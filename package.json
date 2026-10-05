@@ -1,0 +1,18 @@
+{
+  "name": "quest-bot",
+  "version": "1.0.0",
+  "description": "KSHK Store Quest Bot — KSHK Store / discord.gg/kshk",
+  "main": "index.js",
+  "author": "KSHK Store",
+  "license": "Proprietary - KSHK Store",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.9.0",
+    "discord.js": "^14.26.4",
+    "node-fetch": "^2.7.0",
+    "uuid": "^11.1.0"
+  },
+  "homepage": "https://discord.gg/kshk"
+}

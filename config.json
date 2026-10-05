@@ -1,0 +1,10 @@
+{
+  "BOT_TOKEN": "",
+  "DB_NAME": "store.db",
+  "PREFIX": "!",
+  "APP_COMMAND_SYNC_SCOPE": "global",
+  "LOG_GUILD_ID": null,
+  "LOG_CHANNEL_ID": null,
+  "LINK_LOG_GUILD_ID": null,
+  "LINK_LOG_CHANNEL_ID": null
+}
