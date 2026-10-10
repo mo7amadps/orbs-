@@ -190,14 +190,8 @@ const STRINGS = {
         hi: '### 📊 आपके आँकड़े',
     },
     help_placeholder: {
-        ar: '### 📖 المساعدة
-`/start` `/quest` `/vip-quest` `/claim` (Pro) `/stats` `/script` `/help`
-`/quest-room` (Starter)
-`/owner-tokens` (Owner)',
-        en: '### 📖 Help
-`/start` `/quest` `/vip-quest` `/claim` (Pro) `/stats` `/script` `/help`
-`/quest-room` (Starter)
-`/owner-tokens` (Owner)',
+        ar: '### 📖 المساعدة\n`/start` `/quest` `/vip-quest` `/claim` (Pro) `/stats` `/script` `/help`\n`/quest-room` (Starter)\n`/owner-tokens` (Owner)',
+        en: '### 📖 Help\n`/start` `/quest` `/vip-quest` `/claim` (Pro) `/stats` `/script` `/help`\n`/quest-room` (Starter)\n`/owner-tokens` (Owner)',
         fr: '### 📖 Aide\nBientôt : vidéo + token.',
         ru: '### 📖 Помощь\nСкоро: видео + токен.',
         es: '### 📖 Ayuda\nPróximamente: vídeo + token.',
