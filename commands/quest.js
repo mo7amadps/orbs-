@@ -444,7 +444,7 @@ async function handleQuestInteraction(client, interaction) {
         return interaction.reply({ content: '⏹️ Stopped.', ephemeral: true });
     }
 
-    // Auto All (VIP)
+    // Auto All (VIP) — sort easiest/shortest first
     if (interaction.isButton() && interaction.customId === 'quest_auto_all') {
         if (!state || !state.isVipMode) {
             return interaction.reply({ content: t(lang, 'vip_only'), ephemeral: true });
@@ -457,7 +457,19 @@ async function handleQuestInteraction(client, interaction) {
         state.isRunning = true;
         state.queueMode = true;
         const cooldown = COOLDOWN_VIP;
-        const quests = [...state.allQuests];
+
+        // Smart sort: shortest target first, then by task priority (video < play < activity)
+        const TASK_ORDER = { WATCH_VIDEO: 0, WATCH_VIDEO_ON_MOBILE: 1, PLAY_ON_DESKTOP: 2, PLAY_ACTIVITY: 3 };
+        const quests = [...state.allQuests].sort((a, b) => {
+            const ia = extractQuestInfo(a);
+            const ib = extractQuestInfo(b);
+            const secA = (ia.minutes || 0) * 60;
+            const secB = (ib.minutes || 0) * 60;
+            if (secA !== secB) return secA - secB;
+            const ta = TASK_ORDER[ia.taskName] ?? 9;
+            const tb = TASK_ORDER[ib.taskName] ?? 9;
+            return ta - tb;
+        });
 
         for (let i = 0; i < quests.length; i++) {
             if (!state.isRunning) break;
@@ -470,7 +482,8 @@ async function handleQuestInteraction(client, interaction) {
 
             try {
                 await interaction.editReply({
-                    content: `⚡ Auto [${i + 1}/${quests.length}] **${info.questName}** ...`,
+                    content: t(lang, 'auto_queue_sorted', { count: quests.length }) +
+                        `\n⚡ [${i + 1}/${quests.length}] **${info.questName}** (${info.minutes || '?'}m) ...`,
                     components: [],
                 });
             } catch { }

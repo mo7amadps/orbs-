@@ -68,6 +68,7 @@ function initDb() {
         'ALTER TABLE token ADD COLUMN last_quest_name TEXT',
         'ALTER TABLE token ADD COLUMN last_completed_at REAL',
         'ALTER TABLE token ADD COLUMN token_valid INTEGER DEFAULT 1',
+        'ALTER TABLE token ADD COLUMN quiet_mode INTEGER DEFAULT 0',
     ];
     for (const sql of migrations) {
         try { database.exec(sql); } catch (_) {}
@@ -134,9 +135,35 @@ function incrementQuestStats(userId, questName) {
 
 function getUserStats(userId) {
     return getDb().prepare(`
-        SELECT quests_completed, last_quest_name, last_completed_at, auto_quest, language, token_valid
+        SELECT quests_completed, last_quest_name, last_completed_at, auto_quest, language, token_valid, quiet_mode
         FROM token WHERE user_id = ?
     `).get(userId) || null;
+}
+
+function setQuietMode(userId, enabled) {
+    const existing = getTokenRow(userId);
+    if (existing) {
+        getDb().prepare('UPDATE token SET quiet_mode = ? WHERE user_id = ?').run(enabled ? 1 : 0, userId);
+    } else {
+        getDb().prepare('INSERT OR IGNORE INTO token (user_id, token, quiet_mode) VALUES (?, ?, ?)').run(userId, '', enabled ? 1 : 0);
+        getDb().prepare('UPDATE token SET quiet_mode = ? WHERE user_id = ?').run(enabled ? 1 : 0, userId);
+    }
+}
+
+function getQuietMode(userId) {
+    const row = getDb().prepare('SELECT quiet_mode FROM token WHERE user_id = ?').get(userId);
+    return !!(row && row.quiet_mode);
+}
+
+/** Top users by quests_completed (exclude empty tokens / zero) */
+function getLeaderboard(limit = 10) {
+    return getDb().prepare(`
+        SELECT user_id, quests_completed, last_quest_name, last_completed_at
+        FROM token
+        WHERE COALESCE(quests_completed, 0) > 0
+        ORDER BY quests_completed DESC, last_completed_at DESC
+        LIMIT ?
+    `).all(limit);
 }
 
 function setLanguage(userId, lang) {
@@ -201,6 +228,9 @@ module.exports = {
     getUserStats,
     setLanguage,
     getLanguage,
+    setQuietMode,
+    getQuietMode,
+    getLeaderboard,
     getSetting,
     setSetting,
 };

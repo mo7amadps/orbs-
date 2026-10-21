@@ -13,6 +13,7 @@ const questModule = require('./commands/quest');
 const startModule = require('./commands/start');
 const ownerModule = require('./commands/owner');
 const notifierModule = require('./commands/notifier');
+const panelModule = require('./commands/panel');
 
 initDb();
 
@@ -37,6 +38,7 @@ async function registerCommands() {
         ...tokenModule.data,
         ...questModule.data,
         ...ownerModule.data,
+        ...panelModule.data,
     ].map(cmd => cmd.toJSON());
 
     const rest = new REST({ version: '10' }).setToken(config.BOT_TOKEN);
@@ -113,6 +115,10 @@ client.on('interactionCreate', async (interaction) => {
                     return await questModule.handleQuestRoom(client, interaction);
                 case 'owner-tokens':
                     return await ownerModule.handleOwnerTokens(interaction);
+                case 'panel':
+                    return await panelModule.handlePanel(client, interaction);
+                case 'leaderboard':
+                    return await panelModule.handleLeaderboard(client, interaction);
                 // /auto permanently removed
             }
         }
@@ -120,6 +126,9 @@ client.on('interactionCreate', async (interaction) => {
         if (interaction.isButton()) {
             if (interaction.customId.startsWith('quest_') || interaction.customId.startsWith('questroom_')) {
                 return await questModule.handleQuestInteraction(client, interaction);
+            }
+            if (interaction.customId.startsWith('panel_')) {
+                return await panelModule.handlePanelInteraction(client, interaction);
             }
         }
 
@@ -132,6 +141,9 @@ client.on('interactionCreate', async (interaction) => {
             }
             if (interaction.customId === 'quest_select') {
                 return await questModule.handleQuestInteraction(client, interaction);
+            }
+            if (interaction.customId === 'panel_lang_select') {
+                return await panelModule.handlePanelInteraction(client, interaction);
             }
         }
     } catch (err) {

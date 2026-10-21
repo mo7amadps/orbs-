@@ -15,7 +15,7 @@
 const fetch = require('node-fetch');
 const { getHeaders } = require('../utils/headers');
 const { EMOJIES } = require('../utils/emojis');
-const { incrementQuestStats } = require('../database/db');
+const { incrementQuestStats, getQuietMode } = require('../database/db');
 
 const CLAIM_REMINDER_MS = 3 * 60 * 1000; // 3 دقائق
 
@@ -39,9 +39,21 @@ function detectTaskName(tasks) {
     return TASK_PRIORITY.find(t => t in tasks) || Object.keys(tasks)[0] || null;
 }
 
+/** Visual progress bar e.g. ████████░░ 80% */
+function progressBar(percent, width = 12) {
+    const p = Math.max(0, Math.min(100, Math.floor(percent)));
+    const filled = Math.round((p / 100) * width);
+    const empty = width - filled;
+    return '█'.repeat(filled) + '░'.repeat(empty) + ` ${p}%`;
+}
+
 // ─── Build Components v2 progress message ─────────────────────────────────────
-function buildProgressComponents(title, lines) {
+function buildProgressComponents(title, lines, opts = {}) {
     const last10 = lines.slice(-10).join('\n');
+    const barLine = typeof opts.percent === 'number'
+        ? `\`${progressBar(opts.percent)}\``
+        : null;
+    const body = [barLine, '```ruby', last10 || '...', '```'].filter(Boolean).join('\n');
     return {
         flags: 1 << 15, // IS_COMPONENTS_V2
         components: [
@@ -59,7 +71,7 @@ function buildProgressComponents(title, lines) {
                     },
                     {
                         type: 10, // Text Display
-                        content: `\`\`\`ruby\n${last10 || '...'}\n\`\`\``,
+                        content: body,
                     },
                 ],
             },
@@ -70,6 +82,27 @@ function buildProgressComponents(title, lines) {
 // Sleep helper
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/** Fetch with simple retry on network / 429 / 5xx */
+async function fetchWithRetry(url, options, { retries = 3, baseDelay = 2000 } = {}) {
+    let lastErr = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+            const resp = await fetch(url, options);
+            if (resp.status === 429 || resp.status >= 500) {
+                const wait = baseDelay * Math.pow(2, attempt);
+                await sleep(wait);
+                lastErr = new Error(`HTTP ${resp.status}`);
+                continue;
+            }
+            return resp;
+        } catch (err) {
+            lastErr = err;
+            if (attempt < retries) await sleep(baseDelay * Math.pow(2, attempt));
+        }
+    }
+    throw lastErr || new Error('fetch failed');
 }
 
 // ─── Video Quest ───────────────────────────────────────────────────────────────
@@ -103,19 +136,14 @@ async function handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded,
 
         let resp;
         try {
-            resp = await fetch(`https://discord.com/api/v9/quests/${qId}/video-progress`, {
+            resp = await fetchWithRetry(`https://discord.com/api/v9/quests/${qId}/video-progress`, {
                 method: 'POST',
                 headers,
                 body: JSON.stringify({ timestamp }),
-            });
+            }, { retries: 2, baseDelay: 2500 });
         } catch (err) {
             progressLines.push(`[ERROR] Network error: ${err.message.slice(0, 80)}`);
             await dmMessage.edit(buildProgressComponents('Quest Error', progressLines));
-
-/* ╔══════════════════════════════════════════════════════════════════╗
- * ║                 row                    ║
- * ║                       © row                               ║
- * ╚══════════════════════════════════════════════════════════════════╝ */
             return false;
         }
 
@@ -130,17 +158,12 @@ async function handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded,
         completed = data.completed_at != null;
         secondsDone = timestamp;
 
-
-/* ╔══════════════════════════════════════════════════════════════════╗
- * ║                 row                    ║
- * ║                       © row                               ║
- * ╚══════════════════════════════════════════════════════════════════╝ */
         const percent = Math.floor((secondsDone / secondsNeeded) * 100);
-        progressLines.push(`[PROGRESS] ${percent}% (${Math.floor(secondsDone)}/${secondsNeeded}s)`);
+        progressLines.push(`[PROGRESS] ${Math.floor(secondsDone)}/${secondsNeeded}s`);
         if (progressLines.length > 8) progressLines.splice(0, progressLines.length - 8);
 
         await dmMessage.edit(
-            buildProgressComponents(completed ? 'Quest Completed!' : qName, progressLines)
+            buildProgressComponents(completed ? 'Quest Completed!' : qName, progressLines, { percent })
         );
     }
 
@@ -155,11 +178,11 @@ async function handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded,
         } catch { }
     }
 
-    if (!progressLines.length || !progressLines[progressLines.length - 1].startsWith('[PROGRESS] 100%')) {
-        progressLines.push('[PROGRESS] 100%');
-    }
-    progressLines.push('✅ خلصت — روح لصفحة Quests واستلم المكافأة (Claim)');
-    await dmMessage.edit(buildProgressComponents('Quest Completed!', progressLines));
+    progressLines.push('[DONE] 100%');
+    progressLines.push('✅ Done — claim reward:');
+    progressLines.push(`🔗 https://discord.com/quests/${qId}`);
+    progressLines.push('Or use /claim');
+    await dmMessage.edit(buildProgressComponents('Quest Completed!', progressLines, { percent: 100 }));
     return true;
 }
 
@@ -193,17 +216,23 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
 
         let resp;
         try {
-            resp = await fetch(`https://discord.com/api/v9/quests/${qId}/heartbeat`, {
+            resp = await fetchWithRetry(`https://discord.com/api/v9/quests/${qId}/heartbeat`, {
                 method: 'POST',
                 headers,
                 body: JSON.stringify({ application_id: appId, terminal: false }),
-            });
+            }, { retries: 2, baseDelay: 3000 });
         } catch (err) {
             console.error(`[Handler] heartbeat fetch error: ${err.message}`);
+            progressLines.push(`[ERROR] ${err.message.slice(0, 80)}`);
+            await dmMessage.edit(buildProgressComponents('Quest Error', progressLines));
             return false;
         }
 
-        if (resp.status !== 200) return false;
+        if (resp.status !== 200) {
+            progressLines.push(`[ERROR] heartbeat ${resp.status}`);
+            await dmMessage.edit(buildProgressComponents('Quest Error', progressLines));
+            return false;
+        }
 
         const data = await resp.json();
         secondsDone = data?.progress?.PLAY_ON_DESKTOP?.value || 0;
@@ -211,8 +240,9 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
         uiCounter++;
 
         if (uiCounter >= uiThrottle || secondsDone >= secondsNeeded) {
-            progressLines.push(`[PROGRESS] ${percent}%`);
-            await dmMessage.edit(buildProgressComponents(qName, progressLines));
+            progressLines.push(`[PROGRESS] ${Math.floor(secondsDone)}/${secondsNeeded}s`);
+            if (progressLines.length > 8) progressLines.splice(0, progressLines.length - 8);
+            await dmMessage.edit(buildProgressComponents(qName, progressLines, { percent }));
             uiCounter = 0;
         }
 
@@ -226,11 +256,11 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
         });
     } catch { }
 
-    if (!progressLines.length || progressLines[progressLines.length - 1] !== '[PROGRESS] 100%') {
-        progressLines.push('[PROGRESS] 100%');
-    }
-    progressLines.push('✅ خلصت — روح لصفحة Quests واستلم المكافأة (Claim)');
-    await dmMessage.edit(buildProgressComponents('Quest Completed!', progressLines));
+    progressLines.push('[DONE] 100%');
+    progressLines.push('✅ Done — claim reward:');
+    progressLines.push(`🔗 https://discord.com/quests/${qId}`);
+    progressLines.push('Or use /claim');
+    await dmMessage.edit(buildProgressComponents('Quest Completed!', progressLines, { percent: 100 }));
     return true;
 }
 
@@ -259,17 +289,23 @@ async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeed
 
         let resp;
         try {
-            resp = await fetch(`https://discord.com/api/v9/quests/${qId}/heartbeat`, {
+            resp = await fetchWithRetry(`https://discord.com/api/v9/quests/${qId}/heartbeat`, {
                 method: 'POST',
                 headers,
                 body: JSON.stringify({ stream_key: streamKey, terminal: false }),
-            });
+            }, { retries: 2, baseDelay: 3000 });
         } catch (err) {
             console.error(`[Handler] heartbeat fetch error: ${err.message}`);
+            progressLines.push(`[ERROR] ${err.message.slice(0, 80)}`);
+            await dmMessage.edit(buildProgressComponents('Quest Error', progressLines));
             return false;
         }
 
-        if (resp.status !== 200) return false;
+        if (resp.status !== 200) {
+            progressLines.push(`[ERROR] heartbeat ${resp.status}`);
+            await dmMessage.edit(buildProgressComponents('Quest Error', progressLines));
+            return false;
+        }
 
         const data = await resp.json();
         secondsDone = data?.progress?.PLAY_ACTIVITY?.value || 0;
@@ -277,8 +313,9 @@ async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeed
         uiCounter++;
 
         if (uiCounter >= uiThrottle || secondsDone >= secondsNeeded) {
-            progressLines.push(`[PROGRESS] ${percent}%`);
-            await dmMessage.edit(buildProgressComponents(qName, progressLines));
+            progressLines.push(`[PROGRESS] ${Math.floor(secondsDone)}/${secondsNeeded}s`);
+            if (progressLines.length > 8) progressLines.splice(0, progressLines.length - 8);
+            await dmMessage.edit(buildProgressComponents(qName, progressLines, { percent }));
             uiCounter = 0;
         }
 
@@ -292,16 +329,11 @@ async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeed
         });
     } catch { }
 
-/* ╔══════════════════════════════════════════════════════════════════╗
- * ║                 row                    ║
- * ║                       © row                               ║
- * ╚══════════════════════════════════════════════════════════════════╝ */
-
-    if (!progressLines.length || progressLines[progressLines.length - 1] !== '[PROGRESS] 100%') {
-        progressLines.push('[PROGRESS] 100%');
-    }
-    progressLines.push('✅ خلصت — روح لصفحة Quests واستلم المكافأة (Claim)');
-    await dmMessage.edit(buildProgressComponents('Quest Completed!', progressLines));
+    progressLines.push('[DONE] 100%');
+    progressLines.push('✅ Done — claim reward:');
+    progressLines.push(`🔗 https://discord.com/quests/${qId}`);
+    progressLines.push('Or use /claim');
+    await dmMessage.edit(buildProgressComponents('Quest Completed!', progressLines, { percent: 100 }));
     return true;
 }
 
@@ -382,8 +414,8 @@ async function solveQuest({ interaction, token, qId, qName, questConfig, speedMo
         const completed = await runQuest({ dmMessage, headers, qId, qName, questConfig, speedMode, ctrl });
         if (completed) {
             try { incrementQuestStats(interaction.user.id, qName); } catch { }
-            // تذكير الاستلام بعد كل مهمة (نسخة عادية فقط)
-            if (sendClaimReminder) {
+            // تذكير الاستلام بعد كل مهمة (يتجاهل إذا Quiet Mode)
+            if (sendClaimReminder && !getQuietMode(interaction.user.id)) {
                 setTimeout(async () => {
                     try {
                         await interaction.user.send({
@@ -452,18 +484,20 @@ async function autoSolveQuest({ user, token, qId, qName, questConfig, speedMode 
         const completed = await runQuest({ dmMessage: silentMessage, headers, qId, qName, questConfig, speedMode, ctrl });
         if (completed) {
             try { incrementQuestStats(user.id, qName); } catch { }
-            setTimeout(async () => {
-                try {
-                    await user.send({
-                        content: [
-                            `${EMOJIES.quest} **تذكير الاستلام**`,
-                            `خلصت مهمة **${qName}** من 3 دقايق.`,
-                            `إذا لسا ما استلمت، روح لصفحة Quests واضغط Claim.`,
-                            `https://discord.com/quests/${qId}`,
-                        ].join('\n'),
-                    });
-                } catch { }
-            }, CLAIM_REMINDER_MS);
+            if (!getQuietMode(user.id)) {
+                setTimeout(async () => {
+                    try {
+                        await user.send({
+                            content: [
+                                `${EMOJIES.quest} **تذكير الاستلام**`,
+                                `خلصت مهمة **${qName}** من 3 دقايق.`,
+                                `إذا لسا ما استلمت، روح لصفحة Quests واضغط Claim.`,
+                                `https://discord.com/quests/${qId}`,
+                            ].join('\n'),
+                        });
+                    } catch { }
+                }, CLAIM_REMINDER_MS);
+            }
         }
         return completed;
     } finally {
