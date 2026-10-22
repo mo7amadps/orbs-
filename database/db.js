@@ -210,6 +210,31 @@ function setSetting(key, value) {
     getDb().prepare('INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)').run(key, value);
 }
 
+/** Daily-ish backup of SQLite DB next to the live file */
+function backupDatabase() {
+    try {
+        const src = DB_PATH;
+        if (!fs.existsSync(src)) return false;
+        const dir = path.dirname(src);
+        const base = path.basename(src, path.extname(src));
+        const day = new Date().toISOString().slice(0, 10);
+        const dest = path.join(dir, `${base}.backup-${day}.db`);
+        fs.copyFileSync(src, dest);
+        const files = fs.readdirSync(dir)
+            .filter(f => f.startsWith(`${base}.backup-`) && f.endsWith('.db'))
+            .sort();
+        while (files.length > 7) {
+            const old = files.shift();
+            try { fs.unlinkSync(path.join(dir, old)); } catch { }
+        }
+        console.log(`[DB] Backup written: ${dest}`);
+        return true;
+    } catch (err) {
+        console.error('[DB] Backup failed:', err.message);
+        return false;
+    }
+}
+
 module.exports = {
     initDb,
     getDb,
@@ -233,4 +258,5 @@ module.exports = {
     getLeaderboard,
     getSetting,
     setSetting,
+    backupDatabase,
 };

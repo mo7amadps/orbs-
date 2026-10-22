@@ -27,6 +27,12 @@ const { t } = require('../utils/i18n');
 const { isVip, isGuildMember, isStarter } = require('../utils/permissions');
 const { requireStart, requireStarter, requirePro, isOwner } = require('../utils/guards');
 const { config } = require('../utils/config');
+const {
+    fetchRegionMap,
+    groupExclusiveByCountry,
+    countryLabel,
+    getQuestRegionInfo,
+} = require('../utils/regions');
 
 const userQuestState = new Map();
 
@@ -116,9 +122,43 @@ function buildControlButtons(isVipUser) {
                 .setLabel('Auto All / أوتو الكل')
                 .setStyle(ButtonStyle.Success)
                 .setEmoji('⚡'),
+            new ButtonBuilder()
+                .setCustomId('quest_vpn')
+                .setLabel('VPN / Regions')
+                .setStyle(ButtonStyle.Primary)
+                .setEmoji('🌐'),
         );
     }
     return row;
+}
+
+function buildFilterButtons(lang) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('quest_filter_all').setLabel(t(lang, 'filter_all')).setStyle(ButtonStyle.Primary).setEmoji('📋'),
+        new ButtonBuilder().setCustomId('quest_filter_video').setLabel(t(lang, 'filter_video')).setStyle(ButtonStyle.Secondary).setEmoji('🎬'),
+        new ButtonBuilder().setCustomId('quest_filter_play').setLabel(t(lang, 'filter_play')).setStyle(ButtonStyle.Secondary).setEmoji('🎮'),
+        new ButtonBuilder().setCustomId('quest_filter_activity').setLabel(t(lang, 'filter_activity')).setStyle(ButtonStyle.Secondary).setEmoji('📞'),
+        new ButtonBuilder().setCustomId('quest_filter_expiring').setLabel(t(lang, 'filter_expiring')).setStyle(ButtonStyle.Secondary).setEmoji('⏰'),
+    );
+}
+
+function filterQuests(quests, filterKey) {
+    if (!filterKey || filterKey === 'all') return quests;
+    if (filterKey === 'expiring') {
+        return [...quests].sort((a, b) => {
+            const ea = extractQuestInfo(a).expiresAt ? new Date(extractQuestInfo(a).expiresAt).getTime() : Infinity;
+            const eb = extractQuestInfo(b).expiresAt ? new Date(extractQuestInfo(b).expiresAt).getTime() : Infinity;
+            return ea - eb;
+        });
+    }
+    return quests.filter(q => {
+        const info = extractQuestInfo(q);
+        const tn = info.taskName || '';
+        if (filterKey === 'video') return tn.startsWith('WATCH');
+        if (filterKey === 'play') return tn === 'PLAY_ON_DESKTOP';
+        if (filterKey === 'activity') return tn === 'PLAY_ACTIVITY';
+        return true;
+    });
 }
 
 // ─── Resolve token from option or DB ─────────────────────────────────────────
@@ -198,6 +238,7 @@ async function handleQuestDM(interaction, token, lang, isVipMode) {
 
         const selectMenu = buildQuestSelectMenu(result.quests);
         const menuRow = new ActionRowBuilder().addComponents(selectMenu);
+        const filterRow = buildFilterButtons(lang);
         const btnRow = buildControlButtons(isVipMode);
 
         await interaction.editReply({
@@ -208,9 +249,10 @@ async function handleQuestDM(interaction, token, lang, isVipMode) {
                     components: [
                         { type: 10, content: t(lang, 'quest_found', { count: result.quests.length }) },
                         { type: 14, divider: true, spacing: 1 },
-                        { type: 10, content: t(lang, 'select_quest') + (isVipMode ? '\n⚡ **VIP Mode** — 25s cooldown + Auto All' : '\n📋 **Normal** — 90s cooldown') },
+                        { type: 10, content: t(lang, 'select_quest') + (isVipMode ? '\n⚡ **VIP Mode** — 25s cooldown + Auto All' : '\n📋 **Normal** — 90s cooldown') + `\n${t(lang, 'filter_title')}` },
                     ],
                 },
+                filterRow,
                 menuRow,
                 btnRow,
             ],
@@ -442,6 +484,156 @@ async function handleQuestInteraction(client, interaction) {
             userQuestState.delete(userId);
         }
         return interaction.reply({ content: '⏹️ Stopped.', ephemeral: true });
+    }
+
+    // VPN / Regions panel (VIP)
+    if (interaction.isButton() && interaction.customId === 'quest_vpn') {
+        if (!state || !state.isVipMode) {
+            return interaction.reply({ content: t(lang, 'vip_only'), ephemeral: true });
+        }
+        await interaction.deferReply({ ephemeral: true });
+        try {
+            const regionData = await fetchRegionMap(true);
+            const activeIds = (state.allQuests || []).map(q => q.id);
+            // Prefer live user quests; also show global exclusive map counts
+            let countries = groupExclusiveByCountry(regionData.list, activeIds);
+            if (!countries.length) {
+                countries = groupExclusiveByCountry(regionData.list, null).slice(0, 15);
+            }
+
+            // Annotate user's own quests with regions
+            const userLines = (state.allQuests || []).slice(0, 12).map(q => {
+                const info = extractQuestInfo(q);
+                const ri = getQuestRegionInfo(q.id);
+                let reg = '🌍 Global';
+                if (ri && !ri.isGlobal && ri.include && ri.include.length) {
+                    reg = ri.include.map(c => countryLabel(c)).join(', ');
+                } else if (ri && ri.exclude && ri.exclude.length) {
+                    reg = '⛔ excl. ' + ri.exclude.join(',');
+                }
+                return `• **${info.questName}** — ${reg}`;
+            });
+
+            const topCountries = countries.slice(0, 12).map((c, i) =>
+                `\`${String(i + 1).padStart(2, '0')}\` ${c.label} — **${c.count}** exclusive quest(s)`
+            );
+
+            const options = countries.slice(0, 25).map(c =>
+                new StringSelectMenuOptionBuilder()
+                    .setLabel(`${c.flag} ${c.code} (${c.count})`.slice(0, 100))
+                    .setDescription(c.label.slice(0, 100))
+                    .setValue(c.code)
+            );
+
+            const components = [
+                {
+                    type: 17,
+                    components: [
+                        { type: 10, content: t(lang, 'vpn_title') || '### 🌐 VPN / Region Quests' },
+                        { type: 14, divider: true, spacing: 1 },
+                        {
+                            type: 10,
+                            content: (t(lang, 'vpn_hint') || 'Countries with region-locked quests. Connect VPN to that country to unlock them on Discord.') +
+                                (topCountries.length ? `\n\n**Top regions:**\n${topCountries.join('\n')}` : '\n\n_No exclusive map data right now._') +
+                                (userLines.length ? `\n\n**Your visible quests:**\n${userLines.join('\n')}` : ''),
+                        },
+                    ],
+                },
+            ];
+
+            if (options.length) {
+                const select = new StringSelectMenuBuilder()
+                    .setCustomId('quest_vpn_country')
+                    .setPlaceholder('🌍 Pick a country / اختر دولة')
+                    .addOptions(options);
+                components.push(new ActionRowBuilder().addComponents(select));
+            }
+
+            await interaction.editReply({
+                flags: 1 << 15,
+                components,
+            });
+        } catch (err) {
+            await interaction.editReply({ content: t(lang, 'error') + `: ${err.message}` });
+        }
+        return true;
+    }
+
+    // VPN country select → filter session quests to that region (if any) + tips
+    if (interaction.isStringSelectMenu() && interaction.customId === 'quest_vpn_country') {
+        const code = interaction.values[0];
+        await interaction.deferReply({ ephemeral: true });
+        try {
+            await fetchRegionMap();
+            const label = countryLabel(code);
+            const matched = (state && state.allQuests ? state.allQuests : []).filter(q => {
+                const ri = getQuestRegionInfo(q.id);
+                if (!ri) return false;
+                if (ri.include && ri.include.map(c => String(c).toUpperCase()).includes(code)) return true;
+                return false;
+            });
+
+            const lines = matched.length
+                ? matched.map(q => {
+                    const info = extractQuestInfo(q);
+                    return `• **${info.questName}** (${info.minutes || '?'}m) — ${info.taskLabel}`;
+                })
+                : [`_No quests in your current list for ${label}._`, `Use a **${label}** VPN so Discord shows those quests, then run \`/vip-quest\` again.`];
+
+            await interaction.editReply({
+                flags: 1 << 15,
+                components: [
+                    {
+                        type: 17,
+                        components: [
+                            { type: 10, content: `### 🌐 ${label}` },
+                            { type: 14, divider: true, spacing: 1 },
+                            { type: 10, content: lines.join('\n') },
+                        ],
+                    },
+                ],
+            });
+        } catch (err) {
+            await interaction.editReply({ content: t(lang, 'error') + `: ${err.message}` });
+        }
+        return true;
+    }
+
+    // Filter buttons
+    if (interaction.isButton() && interaction.customId.startsWith('quest_filter_')) {
+        if (!state || !state.allQuests) {
+            return interaction.reply({ content: t(lang, 'error') + ' (no session)', ephemeral: true });
+        }
+        if (state.isRunning) {
+            return interaction.reply({ content: t(lang, 'only_one_running'), ephemeral: true });
+        }
+        const key = interaction.customId.replace('quest_filter_', '');
+        const filtered = filterQuests(state.allQuests, key);
+        if (!filtered.length) {
+            return interaction.reply({ content: t(lang, 'no_active_quests'), ephemeral: true });
+        }
+        state.filterKey = key;
+        const selectMenu = buildQuestSelectMenu(filtered);
+        const menuRow = new ActionRowBuilder().addComponents(selectMenu);
+        const filterRow = buildFilterButtons(lang);
+        const btnRow = buildControlButtons(state.isVipMode);
+        await interaction.update({
+            flags: 1 << 15,
+            components: [
+                {
+                    type: 17,
+                    components: [
+                        { type: 10, content: t(lang, 'quest_found', { count: filtered.length }) + `  ·  ${t(lang, 'filter_' + (key === 'all' ? 'all' : key))}` },
+                        { type: 14, divider: true, spacing: 1 },
+                        { type: 10, content: t(lang, 'select_quest') },
+                    ],
+                },
+                filterRow,
+                menuRow,
+                btnRow,
+            ],
+        });
+        return true;
     }
 
     // Auto All (VIP) — sort easiest/shortest first

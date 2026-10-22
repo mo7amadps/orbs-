@@ -15,12 +15,22 @@
 const fetch = require('node-fetch');
 const { getHeaders } = require('../utils/headers');
 const { EMOJIES } = require('../utils/emojis');
-const { incrementQuestStats, getQuietMode } = require('../database/db');
+const { incrementQuestStats, getQuietMode, getLanguage } = require('../database/db');
+const { t } = require('../utils/i18n');
 
 const CLAIM_REMINDER_MS = 3 * 60 * 1000; // 3 دقائق
 
 // Map: `${userId}_${qId}` => { cancelled: bool }
 const runningTasks = new Map();
+
+/** Accent colors by quest task type (Discord integer color) */
+const TASK_COLORS = {
+    WATCH_VIDEO: 0x57F287,           // green
+    WATCH_VIDEO_ON_MOBILE: 0x57F287,
+    PLAY_ON_DESKTOP: 0x5865F2,       // blurple
+    PLAY_ACTIVITY: 0xEB459E,         // fuchsia
+    DEFAULT: 0xFEE75C,               // yellow
+};
 
 function stopQuestTask(userId, qId) {
     const key = `${userId}_${qId}`;
@@ -47,35 +57,64 @@ function progressBar(percent, width = 12) {
     return '█'.repeat(filled) + '░'.repeat(empty) + ` ${p}%`;
 }
 
+function formatEta(secondsLeft) {
+    if (secondsLeft == null || secondsLeft < 0) return null;
+    const s = Math.ceil(secondsLeft);
+    if (s < 60) return `~${s}s`;
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return rem > 0 ? `~${m}m ${rem}s` : `~${m}m`;
+}
+
 // ─── Build Components v2 progress message ─────────────────────────────────────
 function buildProgressComponents(title, lines, opts = {}) {
     const last10 = lines.slice(-10).join('\n');
-    const barLine = typeof opts.percent === 'number'
-        ? `\`${progressBar(opts.percent)}\``
-        : null;
-    const body = [barLine, '```ruby', last10 || '...', '```'].filter(Boolean).join('\n');
+    const parts = [];
+    if (typeof opts.percent === 'number') {
+        let bar = `\`${progressBar(opts.percent)}\``;
+        if (opts.eta) bar += `  ⏱ ${opts.eta}`;
+        parts.push(bar);
+    }
+    parts.push('```ruby', last10 || '...', '```');
+    const body = parts.join('\n');
+
+    const accent = opts.color != null ? opts.color : TASK_COLORS.DEFAULT;
+    const container = {
+        type: 17, // Container
+        accent_color: accent,
+        components: [
+            { type: 10, content: `### ${title}` },
+            { type: 14, divider: true, spacing: 1 },
+            { type: 10, content: body },
+        ],
+    };
+
+    const components = [container];
+
+    // On completion: use classic message + link button (more reliable than mixing V2 + link)
+    if (opts.claimUrl) {
+        return {
+            content: `### ${title}\n${body}\n\n${opts.claimUrl}`,
+            components: [
+                {
+                    type: 1,
+                    components: [
+                        {
+                            type: 2,
+                            style: 5, // Link
+                            label: opts.claimLabel || 'Claim Reward',
+                            url: opts.claimUrl,
+                            emoji: { name: '🎁' },
+                        },
+                    ],
+                },
+            ],
+        };
+    }
+
     return {
         flags: 1 << 15, // IS_COMPONENTS_V2
-        components: [
-            {
-                type: 17, // Container
-                components: [
-                    {
-                        type: 10, // Text Display
-                        content: `### ${title}`,
-                    },
-                    {
-                        type: 14, // Separator
-                        divider: true,
-                        spacing: 1,
-                    },
-                    {
-                        type: 10, // Text Display
-                        content: body,
-                    },
-                ],
-            },
-        ],
+        components,
     };
 }
 
@@ -105,29 +144,36 @@ async function fetchWithRetry(url, options, { retries = 3, baseDelay = 2000 } = 
     throw lastErr || new Error('fetch failed');
 }
 
+function claimOpts(qId, lang, color) {
+    return {
+        percent: 100,
+        color: color || TASK_COLORS.DEFAULT,
+        claimUrl: `https://discord.com/quests/${qId}`,
+        claimLabel: t(lang, 'claim_btn') || 'Claim Reward',
+    };
+}
+
 // ─── Video Quest ───────────────────────────────────────────────────────────────
-async function handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded, ctrl }) {
+async function handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded, ctrl, lang = 'en', quiet = false }) {
     const startTime = Date.now();
     let secondsDone = 0;
-
-/* ╔══════════════════════════════════════════════════════════════════╗
- * ║                 row                    ║
- * ║                       © row                               ║
- * ╚══════════════════════════════════════════════════════════════════╝ */
     const progressLines = [];
     let completed = false;
     const interval = 15000;
+    const color = TASK_COLORS.WATCH_VIDEO;
 
-    await dmMessage.edit(buildProgressComponents(qName, ['Starting video quest (Real-time required)...']));
+    if (!quiet) {
+        await dmMessage.edit(buildProgressComponents(qName, [t(lang, 'quest_starting') || 'Starting...'], { color }));
+    }
 
     while (!completed && secondsDone < secondsNeeded) {
         if (ctrl.cancelled) {
-            await dmMessage.edit(buildProgressComponents('Quest Stopped', ['Quest was stopped by user.']));
+            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_stopped') || 'Quest Stopped', [t(lang, 'quest_stopped_by_user') || 'Stopped by user.'], { color }));
             return false;
         }
         await sleep(interval);
         if (ctrl.cancelled) {
-            await dmMessage.edit(buildProgressComponents('Quest Stopped', ['Quest was stopped by user.']));
+            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_stopped') || 'Quest Stopped', [t(lang, 'quest_stopped_by_user') || 'Stopped by user.'], { color }));
             return false;
         }
 
@@ -143,14 +189,14 @@ async function handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded,
             }, { retries: 2, baseDelay: 2500 });
         } catch (err) {
             progressLines.push(`[ERROR] Network error: ${err.message.slice(0, 80)}`);
-            await dmMessage.edit(buildProgressComponents('Quest Error', progressLines));
+            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
         if (resp.status !== 200) {
             const errText = await resp.text();
             progressLines.push(`[ERROR] API returned ${resp.status}: ${errText.slice(0, 100)}`);
-            await dmMessage.edit(buildProgressComponents('Quest Error', progressLines));
+            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
@@ -159,12 +205,19 @@ async function handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded,
         secondsDone = timestamp;
 
         const percent = Math.floor((secondsDone / secondsNeeded) * 100);
+        const eta = formatEta(secondsNeeded - secondsDone);
         progressLines.push(`[PROGRESS] ${Math.floor(secondsDone)}/${secondsNeeded}s`);
         if (progressLines.length > 8) progressLines.splice(0, progressLines.length - 8);
 
-        await dmMessage.edit(
-            buildProgressComponents(completed ? 'Quest Completed!' : qName, progressLines, { percent })
-        );
+        if (!quiet || completed) {
+            await dmMessage.edit(
+                buildProgressComponents(
+                    completed ? (t(lang, 'quest_completed_title') || 'Quest Completed!') : qName,
+                    progressLines,
+                    { percent, eta, color }
+                )
+            );
+        }
     }
 
     if (!completed) {
@@ -179,18 +232,21 @@ async function handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded,
     }
 
     progressLines.push('[DONE] 100%');
-    progressLines.push('✅ Done — claim reward:');
-    progressLines.push(`🔗 https://discord.com/quests/${qId}`);
-    progressLines.push('Or use /claim');
-    await dmMessage.edit(buildProgressComponents('Quest Completed!', progressLines, { percent: 100 }));
+    progressLines.push(t(lang, 'quest_done_claim') || '✅ Done — claim your reward');
+    await dmMessage.edit(buildProgressComponents(
+        t(lang, 'quest_completed_title') || 'Quest Completed!',
+        progressLines,
+        claimOpts(qId, lang, color)
+    ));
     return true;
 }
 
 // ─── Play Quest ────────────────────────────────────────────────────────────────
-async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, questConfig, speedMode = 'normal', ctrl }) {
+async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, questConfig, speedMode = 'normal', ctrl, lang = 'en', quiet = false }) {
     const appId = questConfig?.application?.id;
+    const color = TASK_COLORS.PLAY_ON_DESKTOP;
     if (!appId) {
-        await dmMessage.edit(buildProgressComponents(qName, [`${EMOJIES.error} Application ID missing`]));
+        await dmMessage.edit(buildProgressComponents(qName, [`${EMOJIES.error} Application ID missing`], { color }));
         return false;
     }
 
@@ -200,7 +256,9 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
     let uiCounter = 0;
     const uiThrottle = speedMode === 'fast' ? 2 : 1;
 
-    await dmMessage.edit(buildProgressComponents(qName, ['Starting quest...']));
+    if (!quiet) {
+        await dmMessage.edit(buildProgressComponents(qName, [t(lang, 'quest_starting') || 'Starting...'], { color }));
+    }
 
     while (secondsDone < secondsNeeded) {
         if (ctrl.cancelled) {
@@ -210,7 +268,7 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
                     body: JSON.stringify({ application_id: appId, terminal: true }),
                 });
             } catch { }
-            await dmMessage.edit(buildProgressComponents('Quest Stopped', ['Quest was stopped by user.']));
+            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_stopped') || 'Quest Stopped', [t(lang, 'quest_stopped_by_user') || 'Stopped by user.'], { color }));
             return false;
         }
 
@@ -224,25 +282,28 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
         } catch (err) {
             console.error(`[Handler] heartbeat fetch error: ${err.message}`);
             progressLines.push(`[ERROR] ${err.message.slice(0, 80)}`);
-            await dmMessage.edit(buildProgressComponents('Quest Error', progressLines));
+            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
         if (resp.status !== 200) {
             progressLines.push(`[ERROR] heartbeat ${resp.status}`);
-            await dmMessage.edit(buildProgressComponents('Quest Error', progressLines));
+            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
         const data = await resp.json();
         secondsDone = data?.progress?.PLAY_ON_DESKTOP?.value || 0;
         const percent = Math.floor((secondsDone / secondsNeeded) * 100);
+        const eta = formatEta(secondsNeeded - secondsDone);
         uiCounter++;
 
         if (uiCounter >= uiThrottle || secondsDone >= secondsNeeded) {
             progressLines.push(`[PROGRESS] ${Math.floor(secondsDone)}/${secondsNeeded}s`);
             if (progressLines.length > 8) progressLines.splice(0, progressLines.length - 8);
-            await dmMessage.edit(buildProgressComponents(qName, progressLines, { percent }));
+            if (!quiet || secondsDone >= secondsNeeded) {
+                await dmMessage.edit(buildProgressComponents(qName, progressLines, { percent, eta, color }));
+            }
             uiCounter = 0;
         }
 
@@ -257,23 +318,28 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
     } catch { }
 
     progressLines.push('[DONE] 100%');
-    progressLines.push('✅ Done — claim reward:');
-    progressLines.push(`🔗 https://discord.com/quests/${qId}`);
-    progressLines.push('Or use /claim');
-    await dmMessage.edit(buildProgressComponents('Quest Completed!', progressLines, { percent: 100 }));
+    progressLines.push(t(lang, 'quest_done_claim') || '✅ Done — claim your reward');
+    await dmMessage.edit(buildProgressComponents(
+        t(lang, 'quest_completed_title') || 'Quest Completed!',
+        progressLines,
+        claimOpts(qId, lang, color)
+    ));
     return true;
 }
 
 // ─── Activity Quest ────────────────────────────────────────────────────────────
-async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeeded, speedMode = 'normal', ctrl }) {
+async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeeded, speedMode = 'normal', ctrl, lang = 'en', quiet = false }) {
     const streamKey = 'call:1:1';
     const interval = speedMode === 'fast' ? 10000 : 20000;
     let secondsDone = 0;
     const progressLines = [];
     let uiCounter = 0;
     const uiThrottle = speedMode === 'fast' ? 2 : 1;
+    const color = TASK_COLORS.PLAY_ACTIVITY;
 
-    await dmMessage.edit(buildProgressComponents(qName, ['Starting quest...']));
+    if (!quiet) {
+        await dmMessage.edit(buildProgressComponents(qName, [t(lang, 'quest_starting') || 'Starting...'], { color }));
+    }
 
     while (secondsDone < secondsNeeded) {
         if (ctrl.cancelled) {
@@ -283,7 +349,7 @@ async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeed
                     body: JSON.stringify({ stream_key: streamKey, terminal: true }),
                 });
             } catch { }
-            await dmMessage.edit(buildProgressComponents('Quest Stopped', ['Quest was stopped by user.']));
+            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_stopped') || 'Quest Stopped', [t(lang, 'quest_stopped_by_user') || 'Stopped by user.'], { color }));
             return false;
         }
 
@@ -297,25 +363,28 @@ async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeed
         } catch (err) {
             console.error(`[Handler] heartbeat fetch error: ${err.message}`);
             progressLines.push(`[ERROR] ${err.message.slice(0, 80)}`);
-            await dmMessage.edit(buildProgressComponents('Quest Error', progressLines));
+            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
         if (resp.status !== 200) {
             progressLines.push(`[ERROR] heartbeat ${resp.status}`);
-            await dmMessage.edit(buildProgressComponents('Quest Error', progressLines));
+            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
         const data = await resp.json();
         secondsDone = data?.progress?.PLAY_ACTIVITY?.value || 0;
         const percent = Math.floor((secondsDone / secondsNeeded) * 100);
+        const eta = formatEta(secondsNeeded - secondsDone);
         uiCounter++;
 
         if (uiCounter >= uiThrottle || secondsDone >= secondsNeeded) {
             progressLines.push(`[PROGRESS] ${Math.floor(secondsDone)}/${secondsNeeded}s`);
             if (progressLines.length > 8) progressLines.splice(0, progressLines.length - 8);
-            await dmMessage.edit(buildProgressComponents(qName, progressLines, { percent }));
+            if (!quiet || secondsDone >= secondsNeeded) {
+                await dmMessage.edit(buildProgressComponents(qName, progressLines, { percent, eta, color }));
+            }
             uiCounter = 0;
         }
 
@@ -330,15 +399,17 @@ async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeed
     } catch { }
 
     progressLines.push('[DONE] 100%');
-    progressLines.push('✅ Done — claim reward:');
-    progressLines.push(`🔗 https://discord.com/quests/${qId}`);
-    progressLines.push('Or use /claim');
-    await dmMessage.edit(buildProgressComponents('Quest Completed!', progressLines, { percent: 100 }));
+    progressLines.push(t(lang, 'quest_done_claim') || '✅ Done — claim your reward');
+    await dmMessage.edit(buildProgressComponents(
+        t(lang, 'quest_completed_title') || 'Quest Completed!',
+        progressLines,
+        claimOpts(qId, lang, color)
+    ));
     return true;
 }
 
 // ─── Core quest runner ────────────────────────────────────────────────────────
-async function runQuest({ dmMessage, headers, qId, qName, questConfig, speedMode, ctrl }) {
+async function runQuest({ dmMessage, headers, qId, qName, questConfig, speedMode, ctrl, lang = 'en', quiet = false }) {
     const taskConfig = questConfig.task_config || questConfig.task_config_v2 || questConfig.taskConfigV2 || questConfig.taskConfig || {};
     const tasks = taskConfig.tasks || {};
 
@@ -355,12 +426,13 @@ async function runQuest({ dmMessage, headers, qId, qName, questConfig, speedMode
         return false;
     }
 
+    const common = { dmMessage, headers, qId, qName, secondsNeeded, ctrl, lang, quiet };
     if (taskName.startsWith('WATCH')) {
-        return handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded, ctrl });
+        return handleVideoQuest(common);
     } else if (taskName === 'PLAY_ON_DESKTOP') {
-        return handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, questConfig, speedMode, ctrl });
+        return handlePlayQuest({ ...common, questConfig, speedMode });
     } else if (taskName === 'PLAY_ACTIVITY') {
-        return handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeeded, speedMode, ctrl });
+        return handleActivityQuest({ ...common, speedMode });
     }
 
     await dmMessage.edit(buildProgressComponents(qName, [`${EMOJIES.error} Unsupported quest task: ${taskName}`]));
@@ -373,11 +445,14 @@ async function runQuest({ dmMessage, headers, qId, qName, questConfig, speedMode
 //   false = بدون تذكير (VIP أثناء Auto All — التذكير مرة واحدة بعد ما تخلص كل المهام)
 async function solveQuest({ interaction, token, qId, qName, questConfig, speedMode = 'normal', sendClaimReminder = true }) {
     const headers = getHeaders(token);
+    const userId = interaction.user.id;
+    const lang = getLanguage(userId) || 'en';
+    const quiet = getQuietMode(userId);
 
     let dmMessage;
     try {
         const dmChannel = await interaction.user.createDM();
-        dmMessage = await dmChannel.send(buildProgressComponents(qName, ['Enrolling...']));
+        dmMessage = await dmChannel.send(buildProgressComponents(qName, [t(lang, 'quest_enrolling') || 'Enrolling...']));
     } catch {
         try {
             await interaction.followUp({
@@ -406,26 +481,23 @@ async function solveQuest({ interaction, token, qId, qName, questConfig, speedMo
         return false;
     }
 
-    const key = `${interaction.user.id}_${qId}`;
+    const key = `${userId}_${qId}`;
     const ctrl = { cancelled: false };
     runningTasks.set(key, ctrl);
 
     try {
-        const completed = await runQuest({ dmMessage, headers, qId, qName, questConfig, speedMode, ctrl });
+        const completed = await runQuest({ dmMessage, headers, qId, qName, questConfig, speedMode, ctrl, lang, quiet });
         if (completed) {
-            try { incrementQuestStats(interaction.user.id, qName); } catch { }
-            // تذكير الاستلام بعد كل مهمة (يتجاهل إذا Quiet Mode)
-            if (sendClaimReminder && !getQuietMode(interaction.user.id)) {
+            try { incrementQuestStats(userId, qName); } catch { }
+            // تذكير الاستلام — يتخطى في Quiet Mode
+            if (sendClaimReminder && !quiet) {
                 setTimeout(async () => {
                     try {
                         await interaction.user.send({
-                            content: [
-                                `${EMOJIES.quest} **تذكير الاستلام**`,
-                                `خلصت مهمة **${qName}** من 3 دقايق.`,
-                                `إذا لسا ما استلمت المكافأة، روح لصفحة **Quests** في ديسكورد واضغط **Claim**.`,
-                                `أو استخدم \`/claim\``,
-                                `https://discord.com/quests/${qId}`,
-                            ].join('\n'),
+                            content: t(lang, 'claim_reminder', {
+                                name: qName,
+                                url: `https://discord.com/quests/${qId}`,
+                            }),
                         });
                     } catch { }
                 }, CLAIM_REMINDER_MS);
@@ -442,8 +514,10 @@ async function solveQuest({ interaction, token, qId, qName, questConfig, speedMo
 // بيبعت DM بس في حالتين: اكتشاف كويست جديد (في notifier) + اكتمال الكويست (في notifier)
 async function autoSolveQuest({ user, token, qId, qName, questConfig, speedMode = 'fast' }) {
     const headers = getHeaders(token);
+    const lang = getLanguage(user.id) || 'en';
+    // VIP Auto: always quiet progress (reminder-only mode)
+    const quiet = true;
 
-    // Enroll بدون أي DM
     let enrollResp;
     try {
         enrollResp = await fetch(`https://discord.com/api/v9/quests/${qId}/enroll`, {
@@ -462,10 +536,9 @@ async function autoSolveQuest({ user, token, qId, qName, questConfig, speedMode 
         return false;
     }
 
-    // بنعمل dummy dmMessage object بيلوج بس بدل ما يبعت DMs
+    // Silent progress — log only (reminder-only for VIP auto)
     const silentMessage = {
         edit: async (payload) => {
-            // بنلوج الـ progress في الـ console بس من غير ما نبعت DM
             try {
                 const lines = payload?.components?.[0]?.components
                     ?.filter(c => c.type === 10)
@@ -481,19 +554,20 @@ async function autoSolveQuest({ user, token, qId, qName, questConfig, speedMode 
     runningTasks.set(key, ctrl);
 
     try {
-        const completed = await runQuest({ dmMessage: silentMessage, headers, qId, qName, questConfig, speedMode, ctrl });
+        const completed = await runQuest({
+            dmMessage: silentMessage, headers, qId, qName, questConfig, speedMode, ctrl, lang, quiet,
+        });
         if (completed) {
             try { incrementQuestStats(user.id, qName); } catch { }
+            // Always send one completion DM for auto (unless user quiet_mode)
             if (!getQuietMode(user.id)) {
                 setTimeout(async () => {
                     try {
                         await user.send({
-                            content: [
-                                `${EMOJIES.quest} **تذكير الاستلام**`,
-                                `خلصت مهمة **${qName}** من 3 دقايق.`,
-                                `إذا لسا ما استلمت، روح لصفحة Quests واضغط Claim.`,
-                                `https://discord.com/quests/${qId}`,
-                            ].join('\n'),
+                            content: t(lang, 'claim_reminder', {
+                                name: qName,
+                                url: `https://discord.com/quests/${qId}`,
+                            }),
                         });
                     } catch { }
                 }, CLAIM_REMINDER_MS);

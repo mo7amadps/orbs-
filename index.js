@@ -139,7 +139,7 @@ client.on('interactionCreate', async (interaction) => {
             if (interaction.customId === 'script_platform_select') {
                 return await tokenModule.handleTokenInteraction(client, interaction);
             }
-            if (interaction.customId === 'quest_select') {
+            if (interaction.customId === 'quest_select' || interaction.customId === 'quest_vpn_country') {
                 return await questModule.handleQuestInteraction(client, interaction);
             }
             if (interaction.customId === 'panel_lang_select') {

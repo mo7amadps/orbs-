@@ -20,17 +20,25 @@ const {
     getSetting,
     setTokenValid,
     getLanguage,
+    backupDatabase,
 } = require('../database/db');
 const { autoSolveQuest, detectTaskName } = require('../handler/handler');
 const { buildQuestEmbed, extractQuestInfo } = require('../utils/questCard');
 const { t } = require('../utils/i18n');
 const { isVip } = require('../utils/permissions');
+const {
+    fetchRegionMap,
+    fetchPublicQuests,
+    isQuestActive,
+    getQuestRegionInfo,
+    formatRegions,
+} = require('../utils/regions');
 
 const knownQuests = new Set();
 let notifierClient = null;
 
-/** Publish new quest to quest-room channel */
-async function postNewQuestToLogChannel(quest) {
+/** Publish new quest to quest-room channel (global + region-locked) */
+async function postNewQuestToLogChannel(quest, { regional = false } = {}) {
     if (!notifierClient) return;
 
     const channelId = getSetting('QUEST_ROOM_CHANNEL_ID') || config.QUEST_ROOM_CHANNEL_ID || config.LOG_CHANNEL_ID;
@@ -43,11 +51,14 @@ async function postNewQuestToLogChannel(quest) {
         }
         if (!channel) return;
 
+        // Ensure region cache is warm so embed shows Regions
+        await fetchRegionMap();
         const payload = buildQuestEmbed(quest, { isNew: true });
 
-        // Add extra buttons: View Quest already there, add "Do Quest" that suggests DM
         const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
         const info = extractQuestInfo(quest);
+        const isRegional = regional || (info.regions && !info.regions.isGlobal);
+
         const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
                 .setLabel('View Quest')
@@ -62,9 +73,60 @@ async function postNewQuestToLogChannel(quest) {
         );
         payload.components = [row];
 
+        if (isRegional && info.regions && info.regions.text) {
+            payload.content = `🌐 **Region-locked quest** — VPN: ${info.regions.lines.join(' · ')}`;
+        }
+
         await channel.send(payload);
     } catch (err) {
         console.error(`[Notifier] Failed to post quest: ${err.message}`);
+    }
+}
+
+let publicSeeded = false;
+
+/**
+ * Scan public quest + region APIs so region-only quests still post to quest-room
+ * even if the bot token is not in that country.
+ * First run only seeds knownQuests (no spam). Later runs post truly new ones.
+ */
+async function checkPublicRegionQuests() {
+    if (!notifierClient) return;
+    try {
+        const [regionData, publicQuests] = await Promise.all([
+            fetchRegionMap(),
+            fetchPublicQuests(),
+        ]);
+        if (!publicQuests.length) return;
+
+        // First pass: seed IDs only so we don't dump the entire catalog into the room
+        if (!publicSeeded) {
+            for (const q of publicQuests) {
+                const qId = String(q.id || (q.config && q.config.id) || '');
+                if (qId) knownQuests.add(qId);
+            }
+            publicSeeded = true;
+            console.log(`[Notifier] Seeded ${knownQuests.size} public quest IDs (no post).`);
+            return;
+        }
+
+        for (const q of publicQuests) {
+            const qId = String(q.id || (q.config && q.config.id) || '');
+            if (!qId || qId === '1412491570820812933') continue;
+            if (!isQuestActive(q)) continue;
+            if (knownQuests.has(qId)) continue;
+
+            const regionInfo = getQuestRegionInfo(qId) || regionData.byId.get(qId);
+            const isRegional = regionInfo && !regionInfo.isGlobal && (
+                (regionInfo.include && regionInfo.include.length) ||
+                (regionInfo.exclude && regionInfo.exclude.length)
+            );
+            knownQuests.add(qId);
+            await postNewQuestToLogChannel(q, { regional: !!isRegional });
+            console.log(`[Notifier] Posted public quest ${qId}${isRegional ? ' (region)' : ''}`);
+        }
+    } catch (err) {
+        console.error(`[Notifier] checkPublicRegionQuests: ${err.message}`);
     }
 }
 
@@ -218,18 +280,35 @@ async function checkScheduledAutoQuests() {
 function startNotifierLoops(client) {
     notifierClient = client;
     initKnownQuests().catch(() => {});
+    fetchRegionMap().catch(() => {});
 
-    // Check new quests every 2 minutes
+    // Token-based new quests every 2 minutes
     setInterval(() => {
         checkNewQuests().catch(err => console.error('[Notifier] interval error:', err.message));
     }, 2 * 60 * 1000);
 
-    // Scheduled every 20 seconds
+    // Public + region quests every 3 minutes (posts region-locked to quest-room)
+    setTimeout(() => {
+        checkPublicRegionQuests().catch(err => console.error('[Notifier] public regions:', err.message));
+    }, 15000);
+    setInterval(() => {
+        checkPublicRegionQuests().catch(err => console.error('[Notifier] public regions:', err.message));
+    }, 3 * 60 * 1000);
+
+    // Scheduled auto every 20 seconds
     setInterval(() => {
         checkScheduledAutoQuests().catch(err => console.error('[Notifier] schedule error:', err.message));
     }, 20 * 1000);
 
-    console.log('[Notifier] Loops started.');
+    // DB backup every 6 hours (+ once on start)
+    try { backupDatabase(); } catch { }
+    setInterval(() => {
+        try { backupDatabase(); } catch (err) {
+            console.error('[Notifier] backup error:', err.message);
+        }
+    }, 6 * 60 * 60 * 1000);
+
+    console.log('[Notifier] Loops started (quests + regions + schedule + backup).');
 }
 
 module.exports = {
