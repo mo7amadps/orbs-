@@ -59,6 +59,15 @@ function initDb() {
         )
     `);
 
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS blacklist (
+            user_id TEXT PRIMARY KEY,
+            reason TEXT,
+            by_user_id TEXT,
+            created_at REAL
+        )
+    `);
+
     // Safe migrations
     const migrations = [
         'ALTER TABLE token ADD COLUMN notify_channel TEXT',
@@ -210,6 +219,33 @@ function setSetting(key, value) {
     getDb().prepare('INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)').run(key, value);
 }
 
+// ---------- Blacklist ----------
+function isBlacklisted(userId) {
+    const row = getDb().prepare('SELECT user_id FROM blacklist WHERE user_id = ?').get(String(userId));
+    return !!row;
+}
+
+function addBlacklist(userId, byUserId, reason = '') {
+    getDb().prepare(`
+        INSERT OR REPLACE INTO blacklist (user_id, reason, by_user_id, created_at)
+        VALUES (?, ?, ?, ?)
+    `).run(String(userId), reason || '', String(byUserId || ''), Date.now() / 1000);
+}
+
+function removeBlacklist(userId) {
+    const info = getDb().prepare('DELETE FROM blacklist WHERE user_id = ?').run(String(userId));
+    return info.changes > 0;
+}
+
+function listBlacklist(limit = 50) {
+    return getDb().prepare(`
+        SELECT user_id, reason, by_user_id, created_at
+        FROM blacklist
+        ORDER BY created_at DESC
+        LIMIT ?
+    `).all(limit);
+}
+
 /** Daily-ish backup of SQLite DB next to the live file */
 function backupDatabase() {
     try {
@@ -259,4 +295,8 @@ module.exports = {
     getSetting,
     setSetting,
     backupDatabase,
+    isBlacklisted,
+    addBlacklist,
+    removeBlacklist,
+    listBlacklist,
 };

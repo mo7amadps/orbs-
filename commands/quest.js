@@ -39,6 +39,23 @@ const userQuestState = new Map();
 const COOLDOWN_NORMAL = 90;
 const COOLDOWN_VIP = 25;
 
+/** Estimate total Auto All time: sum of quest minutes + cooldowns between them */
+function estimateQueueTime(quests, cooldownSec) {
+    let totalSec = 0;
+    const n = quests.length;
+    for (const q of quests) {
+        const info = extractQuestInfo(q);
+        totalSec += (info.minutes || 0) * 60;
+    }
+    if (n > 1) totalSec += (n - 1) * cooldownSec;
+    const mins = Math.ceil(totalSec / 60);
+    if (mins < 1) return { totalSec, label: '<1m', mins: 1 };
+    if (mins < 60) return { totalSec, label: `~${mins}m`, mins };
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return { totalSec, label: m ? `~${h}h ${m}m` : `~${h}h`, mins };
+}
+
 async function waitQuestCooldown(interaction, state, nextQuestName, cooldownSec, lang) {
     const deadline = Date.now() + cooldownSec * 1000;
     let lastDisplayedSecond = null;
@@ -663,6 +680,8 @@ async function handleQuestInteraction(client, interaction) {
             return ta - tb;
         });
 
+        const eta = estimateQueueTime(quests, cooldown);
+
         for (let i = 0; i < quests.length; i++) {
             if (!state.isRunning) break;
             const q = quests[i];
@@ -675,6 +694,7 @@ async function handleQuestInteraction(client, interaction) {
             try {
                 await interaction.editReply({
                     content: t(lang, 'auto_queue_sorted', { count: quests.length }) +
+                        `\n⏱ ${t(lang, 'queue_eta', { eta: eta.label, count: quests.length }) || `ETA ${eta.label} for ${quests.length} quests`}` +
                         `\n⚡ [${i + 1}/${quests.length}] **${info.questName}** (${info.minutes || '?'}m) ...`,
                     components: [],
                 });

@@ -14,6 +14,7 @@ const startModule = require('./commands/start');
 const ownerModule = require('./commands/owner');
 const notifierModule = require('./commands/notifier');
 const panelModule = require('./commands/panel');
+const blacklistModule = require('./commands/blacklist');
 
 initDb();
 
@@ -39,6 +40,7 @@ async function registerCommands() {
         ...questModule.data,
         ...ownerModule.data,
         ...panelModule.data,
+        ...blacklistModule.data,
     ].map(cmd => cmd.toJSON());
 
     const rest = new REST({ version: '10' }).setToken(config.BOT_TOKEN);
@@ -119,6 +121,8 @@ client.on('interactionCreate', async (interaction) => {
                     return await panelModule.handlePanel(client, interaction);
                 case 'leaderboard':
                     return await panelModule.handleLeaderboard(client, interaction);
+                case 'blacklist':
+                    return await blacklistModule.handleBlacklist(client, interaction);
                 // /auto permanently removed
             }
         }
