@@ -66,7 +66,7 @@ function formatEta(secondsLeft) {
     return rem > 0 ? `~${m}m ${rem}s` : `~${m}m`;
 }
 
-// ─── Build Components v2 progress message ─────────────────────────────────────
+// ─── Classic progress message (stable, no Components V2) ─────────────────────
 function buildProgressComponents(title, lines, opts = {}) {
     const last10 = lines.slice(-10).join('\n');
     const parts = [];
@@ -75,47 +75,45 @@ function buildProgressComponents(title, lines, opts = {}) {
         if (opts.eta) bar += `  ⏱ ${opts.eta}`;
         parts.push(bar);
     }
-    parts.push('```ruby', last10 || '...', '```');
+    if (last10) parts.push('```\n' + last10 + '\n```');
     const body = parts.join('\n');
+    const content = `**${title}**\n${body}`.slice(0, 2000);
 
-    const accent = opts.color != null ? opts.color : TASK_COLORS.DEFAULT;
-    const container = {
-        type: 17, // Container
-        accent_color: accent,
-        components: [
-            { type: 10, content: `### ${title}` },
-            { type: 14, divider: true, spacing: 1 },
-            { type: 10, content: body },
-        ],
-    };
-
-    const components = [container];
-
-    // On completion: use classic message + link button (more reliable than mixing V2 + link)
+    const rowComponents = [];
     if (opts.claimUrl) {
-        return {
-            content: `### ${title}\n${body}\n\n${opts.claimUrl}`,
-            components: [
-                {
-                    type: 1,
-                    components: [
-                        {
-                            type: 2,
-                            style: 5, // Link
-                            label: opts.claimLabel || 'Claim Reward',
-                            url: opts.claimUrl,
-                            emoji: { name: '🎁' },
-                        },
-                    ],
-                },
-            ],
-        };
+        rowComponents.push({
+            type: 2,
+            style: 5,
+            label: opts.claimLabel || 'Claim Reward',
+            url: opts.claimUrl,
+            emoji: { name: '🎁' },
+        });
+    }
+    if (opts.showStop) {
+        rowComponents.push({
+            type: 2,
+            style: 4, // Danger
+            custom_id: 'quest_stop',
+            label: 'Stop / إيقاف',
+            emoji: { name: '⏹️' },
+        });
     }
 
-    return {
-        flags: 1 << 15, // IS_COMPONENTS_V2
-        components,
-    };
+    const payload = { content };
+    if (rowComponents.length) {
+        payload.components = [{ type: 1, components: rowComponents.slice(0, 5) }];
+    } else {
+        payload.components = [];
+    }
+    return payload;
+}
+
+async function safeEdit(dmMessage, payload) {
+    try {
+        await dmMessage.edit(payload);
+    } catch (err) {
+        console.error('[Handler] edit failed:', err.message);
+    }
 }
 
 // Sleep helper
@@ -163,17 +161,23 @@ async function handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded,
     const color = TASK_COLORS.WATCH_VIDEO;
 
     if (!quiet) {
-        await dmMessage.edit(buildProgressComponents(qName, [t(lang, 'quest_starting') || 'Starting...'], { color }));
+        await safeEdit(dmMessage, buildProgressComponents(qName, [t(lang, 'quest_starting') || 'Starting...'], { color, showStop: true }));
     }
 
+    const maxMs = (secondsNeeded * 1000) + (5 * 60 * 1000);
     while (!completed && secondsDone < secondsNeeded) {
         if (ctrl.cancelled) {
-            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_stopped') || 'Quest Stopped', [t(lang, 'quest_stopped_by_user') || 'Stopped by user.'], { color }));
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_stopped') || 'Quest Stopped', [t(lang, 'quest_stopped_by_user') || 'Stopped by user.'], { color }));
+            return false;
+        }
+        if (Date.now() - startTime > maxMs) {
+            progressLines.push('[TIMEOUT] stopped to avoid hang');
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
         await sleep(interval);
         if (ctrl.cancelled) {
-            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_stopped') || 'Quest Stopped', [t(lang, 'quest_stopped_by_user') || 'Stopped by user.'], { color }));
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_stopped') || 'Quest Stopped', [t(lang, 'quest_stopped_by_user') || 'Stopped by user.'], { color }));
             return false;
         }
 
@@ -189,14 +193,14 @@ async function handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded,
             }, { retries: 2, baseDelay: 2500 });
         } catch (err) {
             progressLines.push(`[ERROR] Network error: ${err.message.slice(0, 80)}`);
-            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
         if (resp.status !== 200) {
             const errText = await resp.text();
             progressLines.push(`[ERROR] API returned ${resp.status}: ${errText.slice(0, 100)}`);
-            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
@@ -210,11 +214,12 @@ async function handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded,
         if (progressLines.length > 8) progressLines.splice(0, progressLines.length - 8);
 
         if (!quiet || completed) {
-            await dmMessage.edit(
+            await safeEdit(
+                dmMessage,
                 buildProgressComponents(
                     completed ? (t(lang, 'quest_completed_title') || 'Quest Completed!') : qName,
                     progressLines,
-                    { percent, eta, color }
+                    completed ? claimOpts(qId, lang, color) : { percent, eta, color, showStop: true }
                 )
             );
         }
@@ -233,7 +238,7 @@ async function handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded,
 
     progressLines.push('[DONE] 100%');
     progressLines.push(t(lang, 'quest_done_claim') || '✅ Done — claim your reward');
-    await dmMessage.edit(buildProgressComponents(
+    await safeEdit(dmMessage, buildProgressComponents(
         t(lang, 'quest_completed_title') || 'Quest Completed!',
         progressLines,
         claimOpts(qId, lang, color)
@@ -257,8 +262,13 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
     const uiThrottle = speedMode === 'fast' ? 2 : 1;
 
     if (!quiet) {
-        await dmMessage.edit(buildProgressComponents(qName, [t(lang, 'quest_starting') || 'Starting...'], { color }));
+        await safeEdit(dmMessage, buildProgressComponents(qName, [t(lang, 'quest_starting') || 'Starting...'], { color, showStop: true }));
     }
+
+    const startedAt = Date.now();
+    const maxMs = (secondsNeeded * 1000) + (10 * 60 * 1000);
+    let lastProgress = -1;
+    let stuckBeats = 0;
 
     while (secondsDone < secondsNeeded) {
         if (ctrl.cancelled) {
@@ -268,7 +278,12 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
                     body: JSON.stringify({ application_id: appId, terminal: true }),
                 });
             } catch { }
-            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_stopped') || 'Quest Stopped', [t(lang, 'quest_stopped_by_user') || 'Stopped by user.'], { color }));
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_stopped') || 'Quest Stopped', [t(lang, 'quest_stopped_by_user') || 'Stopped by user.'], { color }));
+            return false;
+        }
+        if (Date.now() - startedAt > maxMs) {
+            progressLines.push('[TIMEOUT] no finish — stopped to avoid hang');
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
@@ -282,19 +297,31 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
         } catch (err) {
             console.error(`[Handler] heartbeat fetch error: ${err.message}`);
             progressLines.push(`[ERROR] ${err.message.slice(0, 80)}`);
-            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
         if (resp.status !== 200) {
             progressLines.push(`[ERROR] heartbeat ${resp.status}`);
-            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
         const data = await resp.json();
-        secondsDone = data?.progress?.PLAY_ON_DESKTOP?.value || 0;
-        const percent = Math.floor((secondsDone / secondsNeeded) * 100);
+        secondsDone = data?.progress?.PLAY_ON_DESKTOP?.value || secondsDone || 0;
+        if (secondsDone <= lastProgress) {
+            stuckBeats++;
+            if (stuckBeats >= 8) {
+                progressLines.push('[STUCK] progress frozen — stop');
+                await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
+                return false;
+            }
+        } else {
+            stuckBeats = 0;
+            lastProgress = secondsDone;
+        }
+
+        const percent = Math.min(100, Math.floor((secondsDone / secondsNeeded) * 100));
         const eta = formatEta(secondsNeeded - secondsDone);
         uiCounter++;
 
@@ -302,7 +329,7 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
             progressLines.push(`[PROGRESS] ${Math.floor(secondsDone)}/${secondsNeeded}s`);
             if (progressLines.length > 8) progressLines.splice(0, progressLines.length - 8);
             if (!quiet || secondsDone >= secondsNeeded) {
-                await dmMessage.edit(buildProgressComponents(qName, progressLines, { percent, eta, color }));
+                await safeEdit(dmMessage, buildProgressComponents(qName, progressLines, { percent, eta, color, showStop: true }));
             }
             uiCounter = 0;
         }
@@ -319,7 +346,7 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
 
     progressLines.push('[DONE] 100%');
     progressLines.push(t(lang, 'quest_done_claim') || '✅ Done — claim your reward');
-    await dmMessage.edit(buildProgressComponents(
+    await safeEdit(dmMessage, buildProgressComponents(
         t(lang, 'quest_completed_title') || 'Quest Completed!',
         progressLines,
         claimOpts(qId, lang, color)
@@ -336,9 +363,13 @@ async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeed
     let uiCounter = 0;
     const uiThrottle = speedMode === 'fast' ? 2 : 1;
     const color = TASK_COLORS.PLAY_ACTIVITY;
+    const startedAt = Date.now();
+    const maxMs = (secondsNeeded * 1000) + (10 * 60 * 1000);
+    let lastProgress = -1;
+    let stuckBeats = 0;
 
     if (!quiet) {
-        await dmMessage.edit(buildProgressComponents(qName, [t(lang, 'quest_starting') || 'Starting...'], { color }));
+        await safeEdit(dmMessage, buildProgressComponents(qName, [t(lang, 'quest_starting') || 'Starting...'], { color, showStop: true }));
     }
 
     while (secondsDone < secondsNeeded) {
@@ -349,7 +380,12 @@ async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeed
                     body: JSON.stringify({ stream_key: streamKey, terminal: true }),
                 });
             } catch { }
-            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_stopped') || 'Quest Stopped', [t(lang, 'quest_stopped_by_user') || 'Stopped by user.'], { color }));
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_stopped') || 'Quest Stopped', [t(lang, 'quest_stopped_by_user') || 'Stopped by user.'], { color }));
+            return false;
+        }
+        if (Date.now() - startedAt > maxMs) {
+            progressLines.push('[TIMEOUT] stopped to avoid hang');
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
@@ -363,19 +399,31 @@ async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeed
         } catch (err) {
             console.error(`[Handler] heartbeat fetch error: ${err.message}`);
             progressLines.push(`[ERROR] ${err.message.slice(0, 80)}`);
-            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
         if (resp.status !== 200) {
             progressLines.push(`[ERROR] heartbeat ${resp.status}`);
-            await dmMessage.edit(buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
             return false;
         }
 
         const data = await resp.json();
-        secondsDone = data?.progress?.PLAY_ACTIVITY?.value || 0;
-        const percent = Math.floor((secondsDone / secondsNeeded) * 100);
+        secondsDone = data?.progress?.PLAY_ACTIVITY?.value || secondsDone || 0;
+        if (secondsDone <= lastProgress) {
+            stuckBeats++;
+            if (stuckBeats >= 8) {
+                progressLines.push('[STUCK] progress frozen — stop');
+                await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
+                return false;
+            }
+        } else {
+            stuckBeats = 0;
+            lastProgress = secondsDone;
+        }
+
+        const percent = Math.min(100, Math.floor((secondsDone / secondsNeeded) * 100));
         const eta = formatEta(secondsNeeded - secondsDone);
         uiCounter++;
 
@@ -383,7 +431,7 @@ async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeed
             progressLines.push(`[PROGRESS] ${Math.floor(secondsDone)}/${secondsNeeded}s`);
             if (progressLines.length > 8) progressLines.splice(0, progressLines.length - 8);
             if (!quiet || secondsDone >= secondsNeeded) {
-                await dmMessage.edit(buildProgressComponents(qName, progressLines, { percent, eta, color }));
+                await safeEdit(dmMessage, buildProgressComponents(qName, progressLines, { percent, eta, color, showStop: true }));
             }
             uiCounter = 0;
         }
@@ -400,7 +448,7 @@ async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeed
 
     progressLines.push('[DONE] 100%');
     progressLines.push(t(lang, 'quest_done_claim') || '✅ Done — claim your reward');
-    await dmMessage.edit(buildProgressComponents(
+    await safeEdit(dmMessage, buildProgressComponents(
         t(lang, 'quest_completed_title') || 'Quest Completed!',
         progressLines,
         claimOpts(qId, lang, color)
