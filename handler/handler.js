@@ -525,7 +525,18 @@ async function solveQuest({ interaction, token, qId, qName, questConfig, speedMo
 
     if (![200, 204].includes(enrollResp.status)) {
         const errText = await enrollResp.text().catch(() => '');
-        await dmMessage.edit(buildProgressComponents(qName, [`${EMOJIES.error} Enroll failed (${enrollResp.status})`, errText.slice(0, 100)]));
+        let tip = errText.slice(0, 120);
+        if (enrollResp.status === 404 || /unknown quest/i.test(errText)) {
+            tip = [
+                'المهمة مش متاحة على حسابك (Unknown quest).',
+                '• انتهت أو اتشالت من ديسكورد',
+                '• أو مقفولة على دولة — فعّل VPN ثم أعد /vip-quest',
+                '• أو مش ظاهرة في قائمة مهامك — اختار من القائمة بعد تحديثها',
+            ].join('\n');
+        } else if (enrollResp.status === 403) {
+            tip = 'مرفوض (403) — غالباً قيد منطقة/عمر. جرّب VPN أو مهمة ثانية.';
+        }
+        await safeEdit(dmMessage, buildProgressComponents(qName, [`${EMOJIES.error} Enroll failed (${enrollResp.status})`, tip]));
         return false;
     }
 

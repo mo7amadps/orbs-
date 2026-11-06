@@ -570,21 +570,48 @@ async function handleQuestInteraction(client, interaction) {
                 return ri.include.map(c => String(c).toUpperCase()).includes(code);
             });
 
+            // Only quests that exist on THIS token can be enrolled
+            const onAccount = [];
+            const userById = new Map((state.allQuests || []).map(q => [String(q.id), q]));
+            for (const q of matched) {
+                const id = String(q.id || (q.config && q.config.id) || '');
+                if (userById.has(id)) onAccount.push(userById.get(id));
+            }
+
             if (!matched.length) {
                 return interaction.editReply({
                     content: `🌐 **${label}**\n\n📭 ما في مهام نشطة لهالدولة حالياً.\nفعّل VPN على ${label} وأعد \`/vip-quest\` إذا ظهرت عندك في ديسكورد.`,
                 });
             }
 
-            // Merge into session so solve can find config by id
+            if (!onAccount.length) {
+                const names = matched.slice(0, 8).map(q => {
+                    const info = extractQuestInfo(q);
+                    return `• ${info.questName}`;
+                });
+                return interaction.editReply({
+                    content: [
+                        `🌐 **${label}** — ${matched.length} مهمة بالخريطة`,
+                        '',
+                        '❌ **ولا واحدة منها ظاهرة على حسابك الحين.**',
+                        'ديسكورد ما بيعطي enroll إلا إذا المهمة ضمن قائمة مهامك.',
+                        '',
+                        '**اعمل:**',
+                        `1) فعّل VPN على **${label}**`,
+                        '2) افتح ديسكورد وحدّث الصفحة / التطبيق',
+                        '3) أعد `/vip-quest`',
+                        '4) إذا ظهرت المهام، شغّلها من القائمة الرئيسية (مو من VPN فقط)',
+                        '',
+                        names.length ? `أمثلة مهام الدولة:\n${names.join('\n')}` : '',
+                    ].join('\n'),
+                });
+            }
+
             if (state) {
-                const byId = new Map((state.allQuests || []).map(q => [String(q.id), q]));
-                for (const q of matched) byId.set(String(q.id), q);
-                state.allQuests = [...byId.values()];
                 state.vpnCountry = code;
             }
 
-            const selectMenu = buildQuestSelectMenu(matched);
+            const selectMenu = buildQuestSelectMenu(onAccount);
             selectMenu.setCustomId('quest_vpn_pick');
             const menuRow = new ActionRowBuilder().addComponents(selectMenu);
             const stopRow = new ActionRowBuilder().addComponents(
@@ -597,8 +624,8 @@ async function handleQuestInteraction(client, interaction) {
 
             await interaction.editReply({
                 content: [
-                    `🌐 **${label}** — ${matched.length} quest(s)`,
-                    'اختر مهمة من القائمة. إذا فشل التسجيل: لازم VPN على نفس الدولة.',
+                    `🌐 **${label}** — ${onAccount.length} متاحة على حسابك (من ${matched.length})`,
+                    'اختر مهمة للتشغيل. الباقي يحتاج VPN ثم تحديث `/vip-quest`.',
                 ].join('\n'),
                 components: [menuRow, stopRow],
             });
