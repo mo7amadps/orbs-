@@ -12,10 +12,16 @@
 */
 // handler.js - Quest execution engine
 
-const fetch = require('node-fetch');
+const nodeFetch = require('node-fetch');
 const { getHeaders } = require('../utils/headers');
 const { EMOJIES } = require('../utils/emojis');
 const { incrementQuestStats } = require('../database/db');
+const { withProxy } = require('../utils/proxy');
+
+// All Discord API calls go through the active region proxy (if any)
+function fetch(url, options = {}) {
+    return nodeFetch(url, withProxy(options));
+}
 
 const CLAIM_REMINDER_MS = 3 * 60 * 1000; // 3 دقائق
 

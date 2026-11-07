@@ -59,6 +59,15 @@ function initDb() {
         )
     `);
 
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS proxies (
+            region TEXT PRIMARY KEY,
+            proxy_url TEXT NOT NULL,
+            label TEXT,
+            updated_at REAL
+        )
+    `);
+
     // Safe migrations
     const migrations = [
         'ALTER TABLE token ADD COLUMN notify_channel TEXT',
@@ -183,6 +192,40 @@ function setSetting(key, value) {
     getDb().prepare('INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)').run(key, value);
 }
 
+// ---------- Proxies / Regions ----------
+
+function getProxy(region) {
+    return getDb().prepare('SELECT * FROM proxies WHERE region = ?').get(String(region).toUpperCase()) || null;
+}
+
+function setProxy(region, proxyUrl, label = null) {
+    const code = String(region).toUpperCase();
+    getDb().prepare(`
+        INSERT INTO proxies (region, proxy_url, label, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(region) DO UPDATE SET
+            proxy_url = excluded.proxy_url,
+            label = excluded.label,
+            updated_at = excluded.updated_at
+    `).run(code, proxyUrl, label, Date.now() / 1000);
+}
+
+function deleteProxy(region) {
+    getDb().prepare('DELETE FROM proxies WHERE region = ?').run(String(region).toUpperCase());
+}
+
+function listProxies() {
+    return getDb().prepare('SELECT * FROM proxies ORDER BY region').all();
+}
+
+function getActiveRegion() {
+    return getSetting('ACTIVE_REGION') || 'NONE';
+}
+
+function setActiveRegion(region) {
+    setSetting('ACTIVE_REGION', String(region).toUpperCase());
+}
+
 module.exports = {
     initDb,
     getDb,
@@ -203,4 +246,10 @@ module.exports = {
     getLanguage,
     getSetting,
     setSetting,
+    getProxy,
+    setProxy,
+    deleteProxy,
+    listProxies,
+    getActiveRegion,
+    setActiveRegion,
 };

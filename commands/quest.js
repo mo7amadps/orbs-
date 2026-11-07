@@ -14,7 +14,7 @@ const {
     PermissionFlagsBits,
 } = require('discord.js');
 
-const fetch = require('node-fetch');
+const nodeFetch = require('node-fetch');
 const { getHeaders } = require('../utils/headers');
 const { EMOJIES } = require('../utils/emojis');
 const {
@@ -27,6 +27,11 @@ const { t } = require('../utils/i18n');
 const { isVip, isGuildMember, isStarter } = require('../utils/permissions');
 const { requireStart, requireStarter, requirePro, isOwner } = require('../utils/guards');
 const { config } = require('../utils/config');
+const { withProxy, getActiveRegion, REGION_NAMES } = require('../utils/proxy');
+
+function fetch(url, options = {}) {
+    return nodeFetch(url, withProxy(options));
+}
 
 const userQuestState = new Map();
 
@@ -118,7 +123,44 @@ function buildControlButtons(isVipUser) {
                 .setEmoji('⚡'),
         );
     }
+    row.addComponents(
+        new ButtonBuilder()
+            .setCustomId('quest_vpn_regions')
+            .setLabel('VPN / Regions')
+            .setStyle(ButtonStyle.Primary)
+            .setEmoji('🌐'),
+    );
     return row;
+}
+
+function buildRegionSelectMenu() {
+    const { listProxies, getActiveRegion, REGION_NAMES } = require('../utils/proxy');
+    const active = getActiveRegion() || 'NONE';
+    const rows = listProxies();
+
+    const options = [
+        new StringSelectMenuOptionBuilder()
+            .setLabel('Direct (No Proxy)')
+            .setDescription('Use server IP — بدون بروكسي')
+            .setValue('NONE')
+            .setDefault(active === 'NONE'),
+    ];
+
+    for (const r of rows.slice(0, 24)) {
+        const name = REGION_NAMES[r.region] || r.region;
+        options.push(
+            new StringSelectMenuOptionBuilder()
+                .setLabel(`${r.region} — ${name}`.slice(0, 100))
+                .setDescription((r.label || 'Proxy configured').slice(0, 100))
+                .setValue(r.region)
+                .setDefault(r.region === active),
+        );
+    }
+
+    return new StringSelectMenuBuilder()
+        .setCustomId('quest_region_select')
+        .setPlaceholder('Select region / اختر الدولة')
+        .addOptions(options);
 }
 
 // ─── Resolve token from option or DB ─────────────────────────────────────────
@@ -442,6 +484,60 @@ async function handleQuestInteraction(client, interaction) {
             userQuestState.delete(userId);
         }
         return interaction.reply({ content: '⏹️ Stopped.', ephemeral: true });
+    }
+
+    // VPN / Regions button → show region select
+    if (interaction.isButton() && interaction.customId === 'quest_vpn_regions') {
+        const { listProxies, getActiveRegion, REGION_NAMES } = require('../utils/proxy');
+        const rows = listProxies();
+        const active = getActiveRegion() || 'NONE';
+
+        if (!rows.length) {
+            return interaction.reply({
+                content: [
+                    '⚠️ **No proxies configured yet.**',
+                    '',
+                    'Owner must add proxies first:',
+                    '```',
+                    '/proxy add region:US url:http://user:pass@ip:port',
+                    '/proxy add region:GB url:socks5://user:pass@ip:port',
+                    '```',
+                    `Current: \`${active}\` (direct)`,
+                ].join('\n'),
+                ephemeral: true,
+            });
+        }
+
+        const menu = buildRegionSelectMenu();
+        const row = new ActionRowBuilder().addComponents(menu);
+        const activeName = REGION_NAMES[active] || active;
+
+        return interaction.reply({
+            content: `🌐 **VPN / Regions**\nCurrent: **${activeName}** (\`${active}\`)\nSelect a country — quests will use that IP.`,
+            components: [row],
+            ephemeral: true,
+        });
+    }
+
+    // Region select from VPN button
+    if (interaction.isStringSelectMenu() && interaction.customId === 'quest_region_select') {
+        const { normalizeRegion, setActiveRegion, getProxy, REGION_NAMES } = require('../utils/proxy');
+        const region = normalizeRegion(interaction.values[0]);
+        if (!region) {
+            return interaction.reply({ content: '❌ Invalid region.', ephemeral: true });
+        }
+        if (region !== 'NONE') {
+            const row = getProxy(region);
+            if (!row) {
+                return interaction.reply({ content: `❌ No proxy for \`${region}\`.`, ephemeral: true });
+            }
+        }
+        setActiveRegion(region);
+        const name = REGION_NAMES[region] || region;
+        return interaction.update({
+            content: `✅ Region set to **${name}** (\`${region}\`)\nNew quest requests will use this IP.`,
+            components: [],
+        });
     }
 
     // Auto All (VIP)

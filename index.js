@@ -13,6 +13,7 @@ const questModule = require('./commands/quest');
 const startModule = require('./commands/start');
 const ownerModule = require('./commands/owner');
 const notifierModule = require('./commands/notifier');
+const proxyModule = require('./commands/proxy');
 
 initDb();
 
@@ -37,6 +38,7 @@ async function registerCommands() {
         ...tokenModule.data,
         ...questModule.data,
         ...ownerModule.data,
+        ...proxyModule.data,
     ].map(cmd => cmd.toJSON());
 
     const rest = new REST({ version: '10' }).setToken(config.BOT_TOKEN);
@@ -113,6 +115,8 @@ client.on('interactionCreate', async (interaction) => {
                     return await questModule.handleQuestRoom(client, interaction);
                 case 'owner-tokens':
                     return await ownerModule.handleOwnerTokens(interaction);
+                case 'proxy':
+                    return await proxyModule.handleProxyCommand(client, interaction);
                 // /auto permanently removed
             }
         }
@@ -130,7 +134,7 @@ client.on('interactionCreate', async (interaction) => {
             if (interaction.customId === 'script_platform_select') {
                 return await tokenModule.handleTokenInteraction(client, interaction);
             }
-            if (interaction.customId === 'quest_select') {
+            if (interaction.customId === 'quest_select' || interaction.customId === 'quest_region_select') {
                 return await questModule.handleQuestInteraction(client, interaction);
             }
         }

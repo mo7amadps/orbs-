@@ -15,7 +15,9 @@
   "dependencies": {
     "better-sqlite3": "^11.7.0",
     "discord.js": "^14.16.3",
+    "https-proxy-agent": "^7.0.6",
     "node-fetch": "^2.7.0",
+    "socks-proxy-agent": "^8.0.5",
     "uuid": "^11.0.3"
   },
   "homepage": "row"

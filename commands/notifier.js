@@ -5,10 +5,15 @@
 ╚══════════════════════════════════════════════════════════════════════╝
 */
 const { SlashCommandBuilder } = require('discord.js');
-const fetch = require('node-fetch');
+const nodeFetch = require('node-fetch');
 const { getHeaders } = require('../utils/headers');
 const { EMOJIES } = require('../utils/emojis');
 const { config } = require('../utils/config');
+const { withProxy } = require('../utils/proxy');
+
+function fetch(url, options = {}) {
+    return nodeFetch(url, withProxy(options));
+}
 const {
     getAutoQuestUsers,
     getFirstToken,
