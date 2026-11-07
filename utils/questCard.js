@@ -11,7 +11,6 @@ const {
     ButtonStyle,
 } = require('discord.js');
 const { EMOJIES } = require('./emojis');
-const { getQuestRegionInfo, formatRegions } = require('./regions');
 
 function extractQuestInfo(quest) {
     const cfg = quest.config || {};
@@ -69,9 +68,6 @@ function extractQuestInfo(quest) {
         }
     }
 
-    const regionInfo = getQuestRegionInfo(quest.id);
-    const regions = formatRegions(regionInfo);
-
     return {
         id: quest.id,
         questName,
@@ -86,8 +82,6 @@ function extractQuestInfo(quest) {
         rewardText,
         isEnrolled: !!(quest.user_status && (quest.user_status.enrolled_at || quest.user_status.enrolledAt)),
         isCompleted: !!(quest.user_status && (quest.user_status.completed_at || quest.user_status.completedAt)),
-        regionInfo,
-        regions,
     };
 }
 
@@ -125,10 +119,6 @@ function buildQuestEmbed(quest, { isNew = false } = {}) {
         ? info.taskLabels.map(l => `• ${l}`).join('\n')
         : `• ${info.taskLabel}`;
 
-    const regionBlock = info.regions && info.regions.lines && info.regions.lines.length
-        ? ['', '**Regions:**', ...info.regions.lines.map(l => `• ${l}`)]
-        : [];
-
     const desc = [
         isNew ? `**${info.questName}**\n` : '',
         `**Rewards:**`,
@@ -148,15 +138,13 @@ function buildQuestEmbed(quest, { isNew = false } = {}) {
         '',
         `**Expires At:**`,
         formatTime(info.expiresAt),
-        ...regionBlock,
-    ].filter(v => v !== undefined && v !== null).join('\n');
+    ].filter(Boolean).join('\n');
 
-    const isRegional = info.regions && !info.regions.isGlobal;
     const embed = new EmbedBuilder()
-        .setColor(isRegional ? 0xEB459E : (isNew ? 0x57f287 : 0x5865f2))
+        .setColor(isNew ? 0x57f287 : 0x5865f2)
         .setTitle(title.slice(0, 256))
         .setDescription(desc.slice(0, 4090))
-        .setFooter({ text: isRegional ? `🌐 Region-locked · ${info.id}` : `Quest ID: ${info.id}` })
+        .setFooter({ text: `Quest ID: ${info.id}` })
         .setTimestamp(info.startsAt ? new Date(info.startsAt) : new Date());
 
     if (info.imageUrl) {

@@ -59,15 +59,6 @@ function initDb() {
         )
     `);
 
-    database.exec(`
-        CREATE TABLE IF NOT EXISTS blacklist (
-            user_id TEXT PRIMARY KEY,
-            reason TEXT,
-            by_user_id TEXT,
-            created_at REAL
-        )
-    `);
-
     // Safe migrations
     const migrations = [
         'ALTER TABLE token ADD COLUMN notify_channel TEXT',
@@ -77,7 +68,6 @@ function initDb() {
         'ALTER TABLE token ADD COLUMN last_quest_name TEXT',
         'ALTER TABLE token ADD COLUMN last_completed_at REAL',
         'ALTER TABLE token ADD COLUMN token_valid INTEGER DEFAULT 1',
-        'ALTER TABLE token ADD COLUMN quiet_mode INTEGER DEFAULT 0',
     ];
     for (const sql of migrations) {
         try { database.exec(sql); } catch (_) {}
@@ -144,35 +134,9 @@ function incrementQuestStats(userId, questName) {
 
 function getUserStats(userId) {
     return getDb().prepare(`
-        SELECT quests_completed, last_quest_name, last_completed_at, auto_quest, language, token_valid, quiet_mode
+        SELECT quests_completed, last_quest_name, last_completed_at, auto_quest, language, token_valid
         FROM token WHERE user_id = ?
     `).get(userId) || null;
-}
-
-function setQuietMode(userId, enabled) {
-    const existing = getTokenRow(userId);
-    if (existing) {
-        getDb().prepare('UPDATE token SET quiet_mode = ? WHERE user_id = ?').run(enabled ? 1 : 0, userId);
-    } else {
-        getDb().prepare('INSERT OR IGNORE INTO token (user_id, token, quiet_mode) VALUES (?, ?, ?)').run(userId, '', enabled ? 1 : 0);
-        getDb().prepare('UPDATE token SET quiet_mode = ? WHERE user_id = ?').run(enabled ? 1 : 0, userId);
-    }
-}
-
-function getQuietMode(userId) {
-    const row = getDb().prepare('SELECT quiet_mode FROM token WHERE user_id = ?').get(userId);
-    return !!(row && row.quiet_mode);
-}
-
-/** Top users by quests_completed (exclude empty tokens / zero) */
-function getLeaderboard(limit = 10) {
-    return getDb().prepare(`
-        SELECT user_id, quests_completed, last_quest_name, last_completed_at
-        FROM token
-        WHERE COALESCE(quests_completed, 0) > 0
-        ORDER BY quests_completed DESC, last_completed_at DESC
-        LIMIT ?
-    `).all(limit);
 }
 
 function setLanguage(userId, lang) {
@@ -219,58 +183,6 @@ function setSetting(key, value) {
     getDb().prepare('INSERT OR REPLACE INTO bot_settings (key, value) VALUES (?, ?)').run(key, value);
 }
 
-// ---------- Blacklist ----------
-function isBlacklisted(userId) {
-    const row = getDb().prepare('SELECT user_id FROM blacklist WHERE user_id = ?').get(String(userId));
-    return !!row;
-}
-
-function addBlacklist(userId, byUserId, reason = '') {
-    getDb().prepare(`
-        INSERT OR REPLACE INTO blacklist (user_id, reason, by_user_id, created_at)
-        VALUES (?, ?, ?, ?)
-    `).run(String(userId), reason || '', String(byUserId || ''), Date.now() / 1000);
-}
-
-function removeBlacklist(userId) {
-    const info = getDb().prepare('DELETE FROM blacklist WHERE user_id = ?').run(String(userId));
-    return info.changes > 0;
-}
-
-function listBlacklist(limit = 50) {
-    return getDb().prepare(`
-        SELECT user_id, reason, by_user_id, created_at
-        FROM blacklist
-        ORDER BY created_at DESC
-        LIMIT ?
-    `).all(limit);
-}
-
-/** Daily-ish backup of SQLite DB next to the live file */
-function backupDatabase() {
-    try {
-        const src = DB_PATH;
-        if (!fs.existsSync(src)) return false;
-        const dir = path.dirname(src);
-        const base = path.basename(src, path.extname(src));
-        const day = new Date().toISOString().slice(0, 10);
-        const dest = path.join(dir, `${base}.backup-${day}.db`);
-        fs.copyFileSync(src, dest);
-        const files = fs.readdirSync(dir)
-            .filter(f => f.startsWith(`${base}.backup-`) && f.endsWith('.db'))
-            .sort();
-        while (files.length > 7) {
-            const old = files.shift();
-            try { fs.unlinkSync(path.join(dir, old)); } catch { }
-        }
-        console.log(`[DB] Backup written: ${dest}`);
-        return true;
-    } catch (err) {
-        console.error('[DB] Backup failed:', err.message);
-        return false;
-    }
-}
-
 module.exports = {
     initDb,
     getDb,
@@ -289,14 +201,6 @@ module.exports = {
     getUserStats,
     setLanguage,
     getLanguage,
-    setQuietMode,
-    getQuietMode,
-    getLeaderboard,
     getSetting,
     setSetting,
-    backupDatabase,
-    isBlacklisted,
-    addBlacklist,
-    removeBlacklist,
-    listBlacklist,
 };
