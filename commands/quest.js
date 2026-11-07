@@ -495,14 +495,8 @@ async function handleQuestInteraction(client, interaction) {
         if (!rows.length) {
             return interaction.reply({
                 content: [
-                    '⚠️ **No proxies configured yet.**',
-                    '',
-                    'Owner must add proxies first:',
-                    '```',
-                    '/proxy add region:US url:http://user:pass@ip:port',
-                    '/proxy add region:GB url:socks5://user:pass@ip:port',
-                    '```',
-                    `Current: \`${active}\` (direct)`,
+                    '⚠️ **No proxies available.**',
+                    `Current: \`${active}\``,
                 ].join('\n'),
                 ephemeral: true,
             });
