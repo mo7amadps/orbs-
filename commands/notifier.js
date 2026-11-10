@@ -5,15 +5,10 @@
 ╚══════════════════════════════════════════════════════════════════════╝
 */
 const { SlashCommandBuilder } = require('discord.js');
-const nodeFetch = require('node-fetch');
+const fetch = require('node-fetch');
 const { getHeaders } = require('../utils/headers');
 const { EMOJIES } = require('../utils/emojis');
 const { config } = require('../utils/config');
-const { withProxy } = require('../utils/proxy');
-
-function fetch(url, options = {}) {
-    return nodeFetch(url, withProxy(options));
-}
 const {
     getAutoQuestUsers,
     getFirstToken,
@@ -25,6 +20,7 @@ const {
     getSetting,
     setTokenValid,
     getLanguage,
+    backupDatabase,
 } = require('../database/db');
 const { autoSolveQuest, detectTaskName } = require('../handler/handler');
 const { buildQuestEmbed, extractQuestInfo } = require('../utils/questCard');
@@ -50,9 +46,9 @@ async function postNewQuestToLogChannel(quest) {
 
         const payload = buildQuestEmbed(quest, { isNew: true });
 
-        // Add extra buttons: View Quest already there, add "Do Quest" that suggests DM
         const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
         const info = extractQuestInfo(quest);
+
         const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
                 .setLabel('View Quest')
@@ -223,18 +219,25 @@ async function checkScheduledAutoQuests() {
 function startNotifierLoops(client) {
     notifierClient = client;
     initKnownQuests().catch(() => {});
-
-    // Check new quests every 2 minutes
+    // Token-based new quests every 2 minutes
     setInterval(() => {
         checkNewQuests().catch(err => console.error('[Notifier] interval error:', err.message));
     }, 2 * 60 * 1000);
 
-    // Scheduled every 20 seconds
+    // Scheduled auto every 20 seconds
     setInterval(() => {
         checkScheduledAutoQuests().catch(err => console.error('[Notifier] schedule error:', err.message));
     }, 20 * 1000);
 
-    console.log('[Notifier] Loops started.');
+    // DB backup every 6 hours (+ once on start)
+    try { backupDatabase(); } catch { }
+    setInterval(() => {
+        try { backupDatabase(); } catch (err) {
+            console.error('[Notifier] backup error:', err.message);
+        }
+    }, 6 * 60 * 60 * 1000);
+
+    console.log('[Notifier] Loops started (quests + schedule + backup).');
 }
 
 module.exports = {

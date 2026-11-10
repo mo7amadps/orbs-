@@ -13,15 +13,9 @@ const questModule = require('./commands/quest');
 const startModule = require('./commands/start');
 const ownerModule = require('./commands/owner');
 const notifierModule = require('./commands/notifier');
+const blacklistModule = require('./commands/blacklist');
 
 initDb();
-
-// Seed built-in region proxies (US, GB, DE, ES, PL)
-try {
-    require('./utils/proxy').seedBuiltinProxies();
-} catch (e) {
-    console.error('[Bot] Proxy seed failed:', e.message);
-}
 
 const savedRoom = getSetting('QUEST_ROOM_CHANNEL_ID');
 if (savedRoom) config.QUEST_ROOM_CHANNEL_ID = savedRoom;
@@ -44,6 +38,7 @@ async function registerCommands() {
         ...tokenModule.data,
         ...questModule.data,
         ...ownerModule.data,
+        ...blacklistModule.data,
     ].map(cmd => cmd.toJSON());
 
     const rest = new REST({ version: '10' }).setToken(config.BOT_TOKEN);
@@ -110,8 +105,7 @@ client.on('interactionCreate', async (interaction) => {
                     return await questModule.handleQuest(client, interaction);
                 case 'vip-quest':
                     return await questModule.handleVipQuest(client, interaction);
-                case 'claim':
-                    return await questModule.handleClaim(client, interaction);
+                // /claim temporarily disabled
                 case 'stats':
                     return await questModule.handleStats(client, interaction);
                 case 'help':
@@ -120,13 +114,19 @@ client.on('interactionCreate', async (interaction) => {
                     return await questModule.handleQuestRoom(client, interaction);
                 case 'owner-tokens':
                     return await ownerModule.handleOwnerTokens(interaction);
+                case 'blacklist':
+                    return await blacklistModule.handleBlacklist(client, interaction);
                 // /auto permanently removed
+                // /panel and /leaderboard removed
             }
         }
 
         if (interaction.isButton()) {
             if (interaction.customId.startsWith('quest_') || interaction.customId.startsWith('questroom_')) {
                 return await questModule.handleQuestInteraction(client, interaction);
+            }
+            if (interaction.customId.startsWith('script_plat_')) {
+                return await tokenModule.handleTokenInteraction(client, interaction);
             }
         }
 
@@ -137,7 +137,7 @@ client.on('interactionCreate', async (interaction) => {
             if (interaction.customId === 'script_platform_select') {
                 return await tokenModule.handleTokenInteraction(client, interaction);
             }
-            if (interaction.customId === 'quest_select' || interaction.customId === 'quest_region_select') {
+            if (interaction.customId === 'quest_select') {
                 return await questModule.handleQuestInteraction(client, interaction);
             }
         }

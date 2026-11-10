@@ -13,33 +13,42 @@
 const { v4: uuidv4 } = require('uuid');
 const { Buffer } = require('buffer');
 
-// Updated Nov 2026 — closer to current Discord desktop client
-const CLIENT_VERSION = '1.0.9266';
-const CHROME_VERSION = '152.0.7977.167';
-const ELECTRON_VERSION = '44.9.3';
-const CLIENT_BUILD_NUMBER = 657850;
-const NATIVE_BUILD_NUMBER = 97026;
-
-const USER_AGENT = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/${CLIENT_VERSION} Chrome/${CHROME_VERSION} Electron/${ELECTRON_VERSION} Safari/537.36`;
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9215 Chrome/138.0.7204.251 Electron/37.6.0 Safari/537.36';
+const CLIENT_BUILD_NUMBER = 471091;
 
 function getSuperProperties() {
     return {
         os: 'Windows',
         browser: 'Discord Client',
         release_channel: 'stable',
-        client_version: CLIENT_VERSION,
+        client_version: '1.0.9215',
         os_version: '10.0.19045',
         os_arch: 'x64',
         app_arch: 'x64',
+
+/* ╔══════════════════════════════════════════════════════════════════╗
+ * ║                 row                    ║
+ * ║                       © row                               ║
+ * ╚══════════════════════════════════════════════════════════════════╝ */
         system_locale: 'en-US',
+
+/* ╔══════════════════════════════════════════════════════════════════╗
+ * ║                 row                    ║
+ * ║                       © row                               ║
+ * ╚══════════════════════════════════════════════════════════════════╝ */
         has_client_mods: false,
         client_launch_id: uuidv4(),
         browser_user_agent: USER_AGENT,
-        browser_version: ELECTRON_VERSION,
+        browser_version: '37.6.0',
         os_sdk_version: '19045',
         client_build_number: CLIENT_BUILD_NUMBER,
-        native_build_number: NATIVE_BUILD_NUMBER,
+        native_build_number: 72186,
         client_event_source: null,
+
+/* ╔══════════════════════════════════════════════════════════════════╗
+ * ║                 row                    ║
+ * ║                       © row                               ║
+ * ╚══════════════════════════════════════════════════════════════════╝ */
         launch_signature: uuidv4(),
         client_heartbeat_session_id: uuidv4(),
         client_app_state: 'focused',
@@ -57,10 +66,15 @@ function getHeaders(token) {
         'X-Super-Properties': superProps,
         'X-Discord-Locale': 'en-US',
         'X-Discord-Timezone': 'Asia/Saigon',
+
+/* ╔══════════════════════════════════════════════════════════════════╗
+ * ║                 row                    ║
+ * ║                       © row                               ║
+ * ╚══════════════════════════════════════════════════════════════════╝ */
         'X-Debug-Options': 'bugReporterEnabled',
         Origin: 'https://discord.com',
         Referer: 'https://discord.com/channels/@me',
-        'Sec-Ch-Ua': `"Not)A;Brand";v="8", "Chromium";v="152"`,
+        'Sec-Ch-Ua': '"Not)A;Brand";v="8", "Chromium";v="138"',
         'Sec-Ch-Ua-Mobile': '?0',
         'Sec-Ch-Ua-Platform': '"Windows"',
         'Sec-Fetch-Dest': 'empty',

@@ -14,12 +14,13 @@ const {
     PermissionFlagsBits,
 } = require('discord.js');
 
-const nodeFetch = require('node-fetch');
+const fetch = require('node-fetch');
 const { getHeaders } = require('../utils/headers');
 const { EMOJIES } = require('../utils/emojis');
 const {
     getToken, setToken, getUserStats, getFirstToken, getTokenRow,
     getLanguage, setTokenValid, setSetting, getSetting,
+    shouldSendClaimReminder, markClaimReminderSent,
 } = require('../database/db');
 const { solveQuest, stopQuestTask } = require('../handler/handler');
 const { buildQuestEmbed, extractQuestInfo } = require('../utils/questCard');
@@ -27,16 +28,28 @@ const { t } = require('../utils/i18n');
 const { isVip, isGuildMember, isStarter } = require('../utils/permissions');
 const { requireStart, requireStarter, requirePro, isOwner } = require('../utils/guards');
 const { config } = require('../utils/config');
-const { withProxy, getActiveRegion, REGION_NAMES } = require('../utils/proxy');
-
-function fetch(url, options = {}) {
-    return nodeFetch(url, withProxy(options));
-}
 
 const userQuestState = new Map();
 
 const COOLDOWN_NORMAL = 90;
 const COOLDOWN_VIP = 25;
+
+/** Estimate total Auto All time: sum of quest minutes + cooldowns between them */
+function estimateQueueTime(quests, cooldownSec) {
+    let totalSec = 0;
+    const n = quests.length;
+    for (const q of quests) {
+        const info = extractQuestInfo(q);
+        totalSec += (info.minutes || 0) * 60;
+    }
+    if (n > 1) totalSec += (n - 1) * cooldownSec;
+    const mins = Math.ceil(totalSec / 60);
+    if (mins < 1) return { totalSec, label: '<1m', mins: 1 };
+    if (mins < 60) return { totalSec, label: `~${mins}m`, mins };
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return { totalSec, label: m ? `~${h}h ${m}m` : `~${h}h`, mins };
+}
 
 async function waitQuestCooldown(interaction, state, nextQuestName, cooldownSec, lang) {
     const deadline = Date.now() + cooldownSec * 1000;
@@ -73,11 +86,17 @@ async function fetchActiveQuests(token) {
         return { ok: false, status: resp.status, text: respText, quests: [] };
     }
     const data = JSON.parse(respText);
+    const blockedUntil = data.quest_enrollment_blocked_until || null;
     const allQuests = data.quests || [];
     const foundQuests = [];
     for (const q of allQuests) {
         if (q.id === '1412491570820812933') continue;
-        const cfg = q.config || {};
+        const cfg = { ...(q.config || {}) };
+        if (q.traffic_metadata_raw != null) cfg.traffic_metadata_raw = q.traffic_metadata_raw;
+        if (q.traffic_metadata_sealed != null) cfg.traffic_metadata_sealed = q.traffic_metadata_sealed;
+        cfg._questRoot = q;
+        q.config = cfg;
+
         const expiresAt = cfg.expires_at || cfg.expiresAt;
         if (expiresAt) {
             try { if (new Date() > new Date(expiresAt)) continue; } catch { }
@@ -89,7 +108,15 @@ async function fetchActiveQuests(token) {
         }
         foundQuests.push(q);
     }
-    return { ok: true, status: 200, text: respText, quests: foundQuests, total: allQuests.length };
+    return {
+        ok: true,
+        status: 200,
+        text: respText,
+        quests: foundQuests,
+        total: allQuests.length,
+        blockedUntil,
+        excluded: data.excluded_quests || [],
+    };
 }
 
 function buildQuestSelectMenu(quests) {
@@ -123,44 +150,36 @@ function buildControlButtons(isVipUser) {
                 .setEmoji('⚡'),
         );
     }
-    row.addComponents(
-        new ButtonBuilder()
-            .setCustomId('quest_vpn_regions')
-            .setLabel('VPN / Regions')
-            .setStyle(ButtonStyle.Primary)
-            .setEmoji('🌐'),
-    );
     return row;
 }
 
-function buildRegionSelectMenu() {
-    const { listProxies, getActiveRegion, REGION_NAMES } = require('../utils/proxy');
-    const active = getActiveRegion() || 'NONE';
-    const rows = listProxies();
+function buildFilterButtons(lang) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('quest_filter_all').setLabel(t(lang, 'filter_all')).setStyle(ButtonStyle.Primary).setEmoji('📋'),
+        new ButtonBuilder().setCustomId('quest_filter_video').setLabel(t(lang, 'filter_video')).setStyle(ButtonStyle.Secondary).setEmoji('🎬'),
+        new ButtonBuilder().setCustomId('quest_filter_play').setLabel(t(lang, 'filter_play')).setStyle(ButtonStyle.Secondary).setEmoji('🎮'),
+        new ButtonBuilder().setCustomId('quest_filter_activity').setLabel(t(lang, 'filter_activity')).setStyle(ButtonStyle.Secondary).setEmoji('📞'),
+        new ButtonBuilder().setCustomId('quest_filter_expiring').setLabel(t(lang, 'filter_expiring')).setStyle(ButtonStyle.Secondary).setEmoji('⏰'),
+    );
+}
 
-    const options = [
-        new StringSelectMenuOptionBuilder()
-            .setLabel('Direct (No Proxy)')
-            .setDescription('Use server IP — بدون بروكسي')
-            .setValue('NONE')
-            .setDefault(active === 'NONE'),
-    ];
-
-    for (const r of rows.slice(0, 24)) {
-        const name = REGION_NAMES[r.region] || r.region;
-        options.push(
-            new StringSelectMenuOptionBuilder()
-                .setLabel(`${r.region} — ${name}`.slice(0, 100))
-                .setDescription((r.label || 'Proxy configured').slice(0, 100))
-                .setValue(r.region)
-                .setDefault(r.region === active),
-        );
+function filterQuests(quests, filterKey) {
+    if (!filterKey || filterKey === 'all') return quests;
+    if (filterKey === 'expiring') {
+        return [...quests].sort((a, b) => {
+            const ea = extractQuestInfo(a).expiresAt ? new Date(extractQuestInfo(a).expiresAt).getTime() : Infinity;
+            const eb = extractQuestInfo(b).expiresAt ? new Date(extractQuestInfo(b).expiresAt).getTime() : Infinity;
+            return ea - eb;
+        });
     }
-
-    return new StringSelectMenuBuilder()
-        .setCustomId('quest_region_select')
-        .setPlaceholder('Select region / اختر الدولة')
-        .addOptions(options);
+    return quests.filter(q => {
+        const info = extractQuestInfo(q);
+        const tn = info.taskName || '';
+        if (filterKey === 'video') return tn.startsWith('WATCH');
+        if (filterKey === 'play') return tn === 'PLAY_ON_DESKTOP';
+        if (filterKey === 'activity') return tn === 'PLAY_ACTIVITY';
+        return true;
+    });
 }
 
 // ─── Resolve token from option or DB ─────────────────────────────────────────
@@ -216,10 +235,24 @@ async function handleQuestDM(interaction, token, lang, isVipMode) {
         if (!result.ok) {
             if (result.status === 401) {
                 setTokenValid(interaction.user.id, false);
-                return interaction.editReply({ content: t(lang, 'token_invalid') });
+                return interaction.editReply({
+                    content: `❌ **التوكن منتهي / غير صالح**\nجدّده من \`/script\` بعدين أعد الأمر.`,
+                });
             }
             return interaction.editReply({ content: t(lang, 'error') + ` API ${result.status}` });
         }
+        try { setTokenValid(interaction.user.id, true); } catch { }
+        if (result.blockedUntil) {
+            try {
+                const until = new Date(result.blockedUntil);
+                if (until > new Date()) {
+                    return interaction.editReply({
+                        content: `⛔ ديسكورد حاجب التسجيل بالمهام حتى: **${until.toISOString()}**\nEnrollment blocked — جرّب لاحقاً.`,
+                    });
+                }
+            } catch { }
+        }
+
         if (!result.quests.length) {
             return interaction.editReply({ content: t(lang, 'no_active_quests') });
         }
@@ -243,19 +276,15 @@ async function handleQuestDM(interaction, token, lang, isVipMode) {
         const btnRow = buildControlButtons(isVipMode);
 
         await interaction.editReply({
-            flags: 1 << 15,
-            components: [
-                {
-                    type: 17,
-                    components: [
-                        { type: 10, content: t(lang, 'quest_found', { count: result.quests.length }) },
-                        { type: 14, divider: true, spacing: 1 },
-                        { type: 10, content: t(lang, 'select_quest') + (isVipMode ? '\n⚡ **VIP Mode** — 25s cooldown + Auto All' : '\n📋 **Normal** — 90s cooldown') },
-                    ],
-                },
-                menuRow,
-                btnRow,
-            ],
+            content: [
+                `🔑 **التوكن:** شغال ✅`,
+                t(lang, 'quest_found', { count: result.quests.length }),
+                t(lang, 'select_quest'),
+                isVipMode ? '⚡ **VIP** — 25s · Auto All (أولوية في الطابور)' : '📋 **Normal** — 90s cooldown',
+                '',
+                '⏹️ Stop يظهر مع بدء المهمة / أثناء التشغيل.',
+            ].join('\n'),
+            components: [menuRow, btnRow],
         });
     } catch (err) {
         await interaction.editReply({ content: t(lang, 'error') + `: ${err.message}` });
@@ -486,55 +515,7 @@ async function handleQuestInteraction(client, interaction) {
         return interaction.reply({ content: '⏹️ Stopped.', ephemeral: true });
     }
 
-    // VPN / Regions button → show region select
-    if (interaction.isButton() && interaction.customId === 'quest_vpn_regions') {
-        const { listProxies, getActiveRegion, REGION_NAMES } = require('../utils/proxy');
-        const rows = listProxies();
-        const active = getActiveRegion() || 'NONE';
-
-        if (!rows.length) {
-            return interaction.reply({
-                content: [
-                    '⚠️ **No proxies available.**',
-                    `Current: \`${active}\``,
-                ].join('\n'),
-                ephemeral: true,
-            });
-        }
-
-        const menu = buildRegionSelectMenu();
-        const row = new ActionRowBuilder().addComponents(menu);
-        const activeName = REGION_NAMES[active] || active;
-
-        return interaction.reply({
-            content: `🌐 **VPN / Regions**\nCurrent: **${activeName}** (\`${active}\`)\nSelect a country — quests will use that IP.`,
-            components: [row],
-            ephemeral: true,
-        });
-    }
-
-    // Region select from VPN button
-    if (interaction.isStringSelectMenu() && interaction.customId === 'quest_region_select') {
-        const { normalizeRegion, setActiveRegion, getProxy, REGION_NAMES } = require('../utils/proxy');
-        const region = normalizeRegion(interaction.values[0]);
-        if (!region) {
-            return interaction.reply({ content: '❌ Invalid region.', ephemeral: true });
-        }
-        if (region !== 'NONE') {
-            const row = getProxy(region);
-            if (!row) {
-                return interaction.reply({ content: `❌ No proxy for \`${region}\`.`, ephemeral: true });
-            }
-        }
-        setActiveRegion(region);
-        const name = REGION_NAMES[region] || region;
-        return interaction.update({
-            content: `✅ Region set to **${name}** (\`${region}\`)\nNew quest requests will use this IP.`,
-            components: [],
-        });
-    }
-
-    // Auto All (VIP)
+    // Auto All (VIP) — first pick mode: all / video / play
     if (interaction.isButton() && interaction.customId === 'quest_auto_all') {
         if (!state || !state.isVipMode) {
             return interaction.reply({ content: t(lang, 'vip_only'), ephemeral: true });
@@ -542,12 +523,64 @@ async function handleQuestInteraction(client, interaction) {
         if (state.isRunning) {
             return interaction.reply({ content: t(lang, 'only_one_running'), ephemeral: true });
         }
+        const modeRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('quest_auto_mode_all').setLabel('كل المهام').setStyle(ButtonStyle.Success).setEmoji('⚡'),
+            new ButtonBuilder().setCustomId('quest_auto_mode_video').setLabel('فيديو فقط').setStyle(ButtonStyle.Primary).setEmoji('🎬'),
+            new ButtonBuilder().setCustomId('quest_auto_mode_play').setLabel('ألعاب فقط').setStyle(ButtonStyle.Primary).setEmoji('🎮'),
+        );
+        return interaction.reply({
+            content: '**Auto All — اختر النوع:**\n• كل المهام\n• فيديو فقط\n• ألعاب (Play) فقط\n\nالمهام الفاشلة راح تتعدّى ويكمل الباقي.',
+            components: [modeRow],
+            ephemeral: true,
+        });
+    }
+
+    // Auto All run with selected mode
+    if (interaction.isButton() && interaction.customId.startsWith('quest_auto_mode_')) {
+        if (!state || !state.isVipMode) {
+            return interaction.reply({ content: t(lang, 'vip_only'), ephemeral: true });
+        }
+        if (state.isRunning) {
+            return interaction.reply({ content: t(lang, 'only_one_running'), ephemeral: true });
+        }
+
+        const mode = interaction.customId.replace('quest_auto_mode_', ''); // all | video | play
+        let pool = [...(state.allQuests || [])];
+        if (mode === 'video') {
+            pool = pool.filter(q => {
+                const tn = extractQuestInfo(q).taskName || '';
+                return tn.startsWith('WATCH');
+            });
+        } else if (mode === 'play') {
+            pool = pool.filter(q => {
+                const tn = extractQuestInfo(q).taskName || '';
+                return tn === 'PLAY_ON_DESKTOP' || tn === 'PLAY_ACTIVITY' || tn.startsWith('PLAY_');
+            });
+        }
+
+        if (!pool.length) {
+            return interaction.reply({ content: '📭 ما في مهام من هالنوع حالياً.', ephemeral: true });
+        }
 
         await interaction.deferUpdate();
         state.isRunning = true;
         state.queueMode = true;
         const cooldown = COOLDOWN_VIP;
-        const quests = [...state.allQuests];
+
+        const TASK_ORDER = { WATCH_VIDEO: 0, WATCH_VIDEO_ON_MOBILE: 1, PLAY_ON_DESKTOP: 2, PLAY_ACTIVITY: 3 };
+        const quests = pool.sort((a, b) => {
+            const ia = extractQuestInfo(a);
+            const ib = extractQuestInfo(b);
+            const secA = (ia.minutes || 0) * 60;
+            const secB = (ib.minutes || 0) * 60;
+            if (secA !== secB) return secA - secB;
+            return (TASK_ORDER[ia.taskName] ?? 9) - (TASK_ORDER[ib.taskName] ?? 9);
+        });
+
+        const eta = estimateQueueTime(quests, cooldown);
+        const modeLabel = mode === 'video' ? 'فيديو' : mode === 'play' ? 'ألعاب' : 'الكل';
+        let okCount = 0;
+        let failCount = 0;
 
         for (let i = 0; i < quests.length; i++) {
             if (!state.isRunning) break;
@@ -560,23 +593,34 @@ async function handleQuestInteraction(client, interaction) {
 
             try {
                 await interaction.editReply({
-                    content: `⚡ Auto [${i + 1}/${quests.length}] **${info.questName}** ...`,
-                    components: [],
+                    content: `⚡ Auto All (**${modeLabel}**) · ${quests.length} مهمة\n⏱ ${eta.label}\n` +
+                        `[${i + 1}/${quests.length}] **${info.questName}** (${info.minutes || '?'}m)\n` +
+                        `✅ ${okCount} · ❌ ${failCount}`,
+                    components: [buildControlButtons(true)],
                 });
             } catch { }
 
-            // VIP Auto All: no per-quest claim reminder — one reminder after the whole queue
             const ok = await solveQuest({
                 interaction,
                 userId,
                 token: state.token,
                 qId: q.id,
                 qName: info.questName,
-                questConfig: q.config || {},
+                questConfig: {
+                    ...(q.config || {}),
+                    traffic_metadata_raw: q.traffic_metadata_raw ?? (q.config && q.config.traffic_metadata_raw),
+                    traffic_metadata_sealed: q.traffic_metadata_sealed ?? (q.config && q.config.traffic_metadata_sealed),
+                    _questRoot: q,
+                },
                 speedMode: 'fast',
                 sendClaimReminder: false,
+                isVip: true,
             });
 
+            if (ok) okCount++;
+            else failCount++;
+
+            // Skip failed — continue queue unless user pressed Stop
             if (!state.isRunning) break;
 
             if (i < quests.length - 1) {
@@ -589,25 +633,29 @@ async function handleQuestInteraction(client, interaction) {
         state.isRunning = false;
         state.queueMode = false;
         try {
-            await interaction.editReply({ content: `${EMOJIES.success} Auto queue finished.` });
+            await interaction.editReply({
+                content: `${EMOJIES.success} **Auto All خلص** (${modeLabel})\n✅ نجح: **${okCount}**\n❌ فشل/تخطي: **${failCount}**`,
+                components: [],
+            });
         } catch { }
 
-        // تذكير استلام واحد بعد ما تخلص كل مهام VIP Auto All
         const finishedUser = interaction.user;
-        setTimeout(async () => {
-            try {
-                await finishedUser.send({
-                    content: [
-                        `${EMOJIES.quest} **تذكير الاستلام (VIP)**`,
-                        `خلصت كل المهام في الـ Auto All.`,
-                        `إذا لسا ما استلمت المكافآت، استخدم \`/claim\` أو روح لصفحة Quests واضغط Claim.`,
-                        `https://discord.com/quest-home`,
-                    ].join('\n'),
-                });
-            } catch { }
-        }, 3 * 60 * 1000);
+        if (okCount > 0 && shouldSendClaimReminder(finishedUser.id)) {
+            markClaimReminderSent(finishedUser.id);
+            setTimeout(async () => {
+                try {
+                    await finishedUser.send({
+                        content: [
+                            `${EMOJIES.quest} **تذكير الاستلام (VIP)**`,
+                            `Auto All: ✅ ${okCount} · ❌ ${failCount}`,
+                            `استلم من: https://discord.com/quest-home`,
+                        ].join('\n'),
+                    });
+                } catch { }
+            }, 3 * 60 * 1000);
+        }
 
-        return;
+        return true;
     }
 
     // Select menu
@@ -620,10 +668,11 @@ async function handleQuestInteraction(client, interaction) {
         }
 
         const qId = interaction.values[0];
-        const quest = state.allQuests.find(q => q.id === qId);
+        const quest = state.allQuests.find(q => String(q.id) === String(qId) || String(q.config && q.config.id) === String(qId));
         if (!quest) {
             return interaction.reply({ content: t(lang, 'error') + ' (quest not found)', ephemeral: true });
         }
+        if (!quest.id && quest.config && quest.config.id) quest.id = quest.config.id;
 
         await interaction.deferUpdate();
 
@@ -649,9 +698,15 @@ async function handleQuestInteraction(client, interaction) {
             token: state.token,
             qId,
             qName: info.questName,
-            questConfig: quest.config || {},
+            questConfig: {
+                ...(quest.config || {}),
+                traffic_metadata_raw: quest.traffic_metadata_raw ?? (quest.config && quest.config.traffic_metadata_raw),
+                traffic_metadata_sealed: quest.traffic_metadata_sealed ?? (quest.config && quest.config.traffic_metadata_sealed),
+                _questRoot: quest,
+            },
             speedMode: state.isVipMode ? 'fast' : 'normal',
             sendClaimReminder: true,
+            isVip: !!state.isVipMode,
         });
 
         state.isRunning = false;
@@ -677,13 +732,7 @@ module.exports = {
                 opt.setName('token').setDescription('Your Discord User Token').setRequired(false)
             )
             .setDMPermission(true),
-        new SlashCommandBuilder()
-            .setName('claim')
-            .setDescription('Claim all ready Orb rewards (Pro only)')
-            .addStringOption(opt =>
-                opt.setName('token').setDescription('Your Discord User Token').setRequired(false)
-            )
-            .setDMPermission(true),
+        // /claim temporarily disabled
         new SlashCommandBuilder()
             .setName('stats')
             .setDescription('Your stats / إحصائياتك')

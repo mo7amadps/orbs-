@@ -5,7 +5,7 @@
 ╚══════════════════════════════════════════════════════════════════════╝
 */
 const { config } = require('./config');
-const { getLanguage, getTokenRow } = require('../database/db');
+const { getLanguage, getTokenRow, isBlacklisted } = require('../database/db');
 const { t } = require('./i18n');
 const { isGuildMember, isStarter, isVip } = require('./permissions');
 
@@ -54,7 +54,20 @@ async function requireLanguage(interaction) {
     return true;
 }
 
+async function requireNotBlacklisted(interaction) {
+    const userId = interaction.user.id;
+    if (isOwner(userId)) return false;
+    if (!isBlacklisted(userId)) return false;
+    const lang = getLanguage(userId) || 'en';
+    await interaction.reply({
+        content: t(lang, 'blacklisted') || '❌ You are blacklisted from using this bot.',
+        ephemeral: true,
+    });
+    return true;
+}
+
 async function requireStart(client, interaction) {
+    if (await requireNotBlacklisted(interaction)) return true;
     if (await requireServer(client, interaction)) return true;
     if (await requireLanguage(interaction)) return true;
     return false;
@@ -66,6 +79,7 @@ async function requireStart(client, interaction) {
  * - In server: Starter or VIP (or Owner)
  */
 async function requireMemberOrStarter(client, interaction) {
+    if (await requireNotBlacklisted(interaction)) return true;
     if (await requireServer(client, interaction)) return true;
 
     const userId = interaction.user.id;
@@ -103,6 +117,7 @@ async function requireStarter(client, interaction) {
  * Pro / VIP only (DM or server) — VIP role required
  */
 async function requirePro(client, interaction) {
+    if (await requireNotBlacklisted(interaction)) return true;
     if (await requireServer(client, interaction)) return true;
     if (await requireLanguage(interaction)) return true;
 
@@ -124,6 +139,7 @@ async function requirePro(client, interaction) {
 module.exports = {
     requireServer,
     requireLanguage,
+    requireNotBlacklisted,
     requireStart,
     requireMemberOrStarter,
     requireStarter,

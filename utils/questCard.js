@@ -138,7 +138,7 @@ function buildQuestEmbed(quest, { isNew = false } = {}) {
         '',
         `**Expires At:**`,
         formatTime(info.expiresAt),
-    ].filter(Boolean).join('\n');
+    ].filter(v => v !== undefined && v !== null).join('\n');
 
     const embed = new EmbedBuilder()
         .setColor(isNew ? 0x57f287 : 0x5865f2)
