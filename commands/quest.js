@@ -367,8 +367,6 @@ function buildHelpText(lang, { inGuild = false } = {}) {
                 '',
                 '**أوامر السيرفر فقط** (ما تظهر بالخاص مع البوت)',
                 '`/quest-room` — (Starter) روم نشر المهام الجديدة',
-                '`/blacklist` — (أدمن) حظر / فك حظر مستخدم',
-                '`/owner-tokens` — (مالك البوت) إدارة التوكنات',
             );
         }
         return lines.join('\n');
@@ -397,8 +395,6 @@ function buildHelpText(lang, { inGuild = false } = {}) {
             '',
             '**Server only** (not available in bot DMs)',
             '`/quest-room` — (Starter) Channel for new quest posts',
-            '`/blacklist` — (Admin) Ban/unban users',
-            '`/owner-tokens` — (Owner) Manage saved tokens',
         );
     }
     return lines.join('\n');

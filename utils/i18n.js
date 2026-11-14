@@ -200,8 +200,8 @@ const STRINGS = {
         hi: '### 📊 आपके आँकड़े',
     },
     help_placeholder: {
-        ar: '### 📖 المساعدة\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`\n`/quest-room` (Starter) · `/blacklist` (Admin)\n`/owner-tokens` (Owner)',
-        en: '### 📖 Help\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`\n`/quest-room` (Starter) · `/blacklist` (Admin)\n`/owner-tokens` (Owner)',
+        ar: '### 📖 المساعدة\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`\n`/quest-room` (Starter)\n
+        en: '### 📖 Help\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`\n`/quest-room` (Starter)\n
         fr: '### 📖 Aide\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`',
         ru: '### 📖 Помощь\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`',
         es: '### 📖 Ayuda\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`',
