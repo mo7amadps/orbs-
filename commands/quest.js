@@ -340,11 +340,76 @@ async function handleStats(client, interaction) {
 }
 
 // ─── /help ───────────────────────────────────────────────────────────────────
+function buildHelpText(lang, { inGuild = false } = {}) {
+    const ar = (lang || 'en') === 'ar';
+    if (ar) {
+        const lines = [
+            '### 📖 مساعدة البوت',
+            '',
+            '**للجميع** (تشتغل بالخاص وبالسيرفر)',
+            '`/start` — أول خطوة: تختار لغة البوت',
+            '`/script` — كيف تجيب توكن ديسكورد (خطوات حسب جهازك)',
+            '`/quest` — تشغّل المهام للوضع **العادي** (مهمة واحدة، كولداون أطول)',
+            '`/vip-quest` — مهام **VIP**: أسرع + Auto All (كل المهام / فيديو / ألعاب)',
+            '`/stats` — إحصائياتك (كم مهمة خلصت)',
+            '`/help` — هالرسالة',
+            '',
+            '**كيف تشتغل؟**',
+            '1) `/start` → لغة',
+            '2) `/script` → توكن',
+            '3) `/quest` أو `/vip-quest` → اختار مهمة أو Auto All',
+            '4) التقدم يوصل بالخاص · الاستلام من صفحة Quests في ديسكورد',
+            '',
+            '⚠️ لا تشارك توكنك مع أحد.',
+        ];
+        if (inGuild) {
+            lines.splice(10, 0,
+                '',
+                '**أوامر السيرفر فقط** (ما تظهر بالخاص مع البوت)',
+                '`/quest-room` — (Starter) روم نشر المهام الجديدة',
+                '`/blacklist` — (أدمن) حظر / فك حظر مستخدم',
+                '`/owner-tokens` — (مالك البوت) إدارة التوكنات',
+            );
+        }
+        return lines.join('\n');
+    }
+    const lines = [
+        '### 📖 Bot Help',
+        '',
+        '**Everyone** (DM + server)',
+        '`/start` — Pick your language',
+        '`/script` — How to get your Discord user token',
+        '`/quest` — **Normal** mode quests (one at a time, longer cooldown)',
+        '`/vip-quest` — **VIP** mode: faster + Auto All (all / video / play)',
+        '`/stats` — Your completion stats',
+        '`/help` — This message',
+        '',
+        '**Flow**',
+        '1) `/start` → language',
+        '2) `/script` → token',
+        '3) `/quest` or `/vip-quest` → pick a quest or Auto All',
+        '4) Progress in DMs · claim rewards on Discord Quests page',
+        '',
+        '⚠️ Never share your token.',
+    ];
+    if (inGuild) {
+        lines.splice(10, 0,
+            '',
+            '**Server only** (not available in bot DMs)',
+            '`/quest-room` — (Starter) Channel for new quest posts',
+            '`/blacklist` — (Admin) Ban/unban users',
+            '`/owner-tokens` — (Owner) Manage saved tokens',
+        );
+    }
+    return lines.join('\n');
+}
+
 async function handleHelp(client, interaction) {
     if (await requireStarter(client, interaction)) return;
-    const lang = getLanguage(interaction.user.id);
+    const lang = getLanguage(interaction.user.id) || 'en';
+    const inGuild = Boolean(interaction.guildId);
     await interaction.reply({
-        content: t(lang, 'help_placeholder'),
+        content: buildHelpText(lang, { inGuild }),
         ephemeral: true,
     });
 }
