@@ -108,8 +108,7 @@ client.on('interactionCreate', async (interaction) => {
                 // /claim temporarily disabled
                 case 'stats':
                     return await questModule.handleStats(client, interaction);
-                case 'help':
-                    return await questModule.handleHelp(client, interaction);
+                // /help removed
                 case 'quest-room':
                     return await questModule.handleQuestRoom(client, interaction);
                 case 'owner-tokens':
