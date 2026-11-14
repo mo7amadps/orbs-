@@ -289,7 +289,7 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
         return false;
     }
 
-    const interval = speedMode === 'fast' ? 30000 : 60000;
+    const interval = speedMode === 'fast' ? 45000 : 60000;
     let secondsDone = 0;
     const progressLines = [];
     let uiCounter = 0;
@@ -391,7 +391,7 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
 // ─── Activity Quest ────────────────────────────────────────────────────────────
 async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeeded, speedMode = 'normal', ctrl, lang = 'en', quiet = false }) {
     const streamKey = 'call:1:1';
-    const interval = speedMode === 'fast' ? 10000 : 20000;
+    const interval = speedMode === 'fast' ? 20000 : 30000;
     let secondsDone = 0;
     const progressLines = [];
     let uiCounter = 0;
@@ -581,18 +581,26 @@ async function solveQuest({ interaction, token, qId, qName, questConfig, speedMo
         if (![200, 204].includes(enrollResp.status)) {
             const errText = await enrollResp.text().catch(() => '');
             let tip = errText.slice(0, 120);
+            let rateLimited = false;
+            let retryAfterSec = 60;
             if (enrollResp.status === 404 || /unknown quest/i.test(errText)) {
-                tip = [
-                    'Unknown quest — ديسكورد رفض التسجيل.',
-                    'جرّب: توكن جديد من /script · أو Accept يدوي من Quest Home',
-                ].join('\n');
+                tip = t(lang, 'enroll_unknown') || 'Unknown quest — Discord rejected enrollment.';
             } else if (enrollResp.status === 403) {
-                tip = 'مرفوض (403) — قيد منطقة/عمر أو enrollment blocked.';
-            } else if (enrollResp.status === 429) {
-                tip = 'Rate limit — انتظر دقيقة وأعد المحاولة.';
+                tip = t(lang, 'enroll_forbidden') || 'Forbidden (403) — region/age or enrollment blocked.';
+            } else if (enrollResp.status === 429 || /rate limited/i.test(errText)) {
+                rateLimited = true;
+                try {
+                    const j = JSON.parse(errText);
+                    if (j.retry_after) retryAfterSec = Math.ceil(Number(j.retry_after));
+                } catch { }
+                tip = (t(lang, 'rate_limited') || 'Discord rate limit. Stopped. Wait {sec}s then try again.')
+                    .replace('{sec}', String(retryAfterSec));
             }
-            await safeEdit(dmMessage, buildProgressComponents(qName, [`${EMOJIES.error} Enroll failed (${enrollResp.status})`, tip]));
-            return false;
+            await safeEdit(dmMessage, buildProgressComponents(
+                rateLimited ? (t(lang, 'rate_limited_title') || 'Rate limited') : qName,
+                [`${EMOJIES.error} ${tip}`],
+            ));
+            return rateLimited ? 'RATE_LIMITED' : false;
         }
 
         const key = `${userId}_${qId}`;

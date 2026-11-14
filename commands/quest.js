@@ -32,7 +32,7 @@ const { config } = require('../utils/config');
 const userQuestState = new Map();
 
 const COOLDOWN_NORMAL = 90;
-const COOLDOWN_VIP = 25;
+const COOLDOWN_VIP = 60; // أقل Rate Limit
 
 /** Estimate total Auto All time: sum of quest minutes + cooldowns between them */
 function estimateQueueTime(quests, cooldownSec) {
@@ -280,7 +280,7 @@ async function handleQuestDM(interaction, token, lang, isVipMode) {
                 `🔑 **التوكن:** شغال ✅`,
                 t(lang, 'quest_found', { count: result.quests.length }),
                 t(lang, 'select_quest'),
-                isVipMode ? '⚡ **VIP** — 25s · Auto All (أولوية في الطابور)' : '📋 **Normal** — 90s cooldown',
+                isVipMode ? '⚡ **VIP** — 60s · Auto All (أولوية في الطابور)' : '📋 **Normal** — 90s cooldown',
                 '',
                 '⏹️ Stop يظهر مع بدء المهمة / أثناء التشغيل.',
             ].join('\n'),
@@ -602,10 +602,28 @@ async function handleQuestInteraction(client, interaction) {
                     traffic_metadata_sealed: q.traffic_metadata_sealed ?? (q.config && q.config.traffic_metadata_sealed),
                     _questRoot: q,
                 },
-                speedMode: 'fast',
+                // normal heartbeat interval أثناء Auto All = أقل طلبات = أقل Rate Limit
+                speedMode: 'normal',
                 sendClaimReminder: false,
                 isVip: true,
             });
+
+            if (ok === 'RATE_LIMITED') {
+                failCount++;
+                state.isRunning = false;
+                try {
+                    await interaction.editReply({
+                        content: [
+                            t(lang, 'rate_limited_title') || '⛔ Rate limited',
+                            t(lang, 'rate_limited_stop') || 'Discord rate-limited this account. Queue stopped.',
+                            `✅ ${okCount} · ❌ ${failCount}`,
+                            t(lang, 'rate_limited_wait') || 'Wait a few minutes then run /vip-quest again.',
+                        ].join('\n'),
+                        components: [],
+                    });
+                } catch { }
+                break;
+            }
 
             if (ok) okCount++;
             else failCount++;
