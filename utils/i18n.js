@@ -200,14 +200,14 @@ const STRINGS = {
         hi: '### 📊 आपके आँकड़े',
     },
     help_placeholder: {
-        ar: '### 📖 المساعدة\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`\n`/quest-room` (Starter)\n
-        en: '### 📖 Help\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`\n`/quest-room` (Starter)\n
-        fr: '### 📖 Aide\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`',
-        ru: '### 📖 Помощь\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`',
-        es: '### 📖 Ayuda\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`',
-        de: '### 📖 Hilfe\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`',
-        zh: '### 📖 帮助\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`',
-        hi: '### 📖 मदद\n`/start` `/quest` `/vip-quest` `/stats` `/script` `/help`',
+        ar: '### help AR -- /start /quest /vip-quest /stats /script /help',
+        en: '### Help -- /start /quest /vip-quest /stats /script /help',
+        fr: '### Aide -- /start /quest /vip-quest /stats /script /help',
+        ru: '### Help -- /start /quest /vip-quest /stats /script /help',
+        es: '### Help -- /start /quest /vip-quest /stats /script /help',
+        de: '### Help -- /start /quest /vip-quest /stats /script /help',
+        zh: '### Help -- /start /quest /vip-quest /stats /script /help',
+        hi: '### Help -- /start /quest /vip-quest /stats /script /help',
     },
     token_expired_notify: {
         ar: '⚠️ **تنبيه:** توكنك منتهي أو غير صالح.\nاستخدم `/script` عشان تجيب توكن جديد ثم أعد المحاولة.',
