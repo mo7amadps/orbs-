@@ -32,6 +32,8 @@ function extractQuestInfo(quest) {
         'Unknown Game';
 
     const taskLabels = taskNames.map(tn => formatTaskLabel(tn, Math.ceil((tasks[tn]?.target || 0) / 60)));
+    const isManual = taskNames.length === 0 || taskNames.every(tn => isManualTaskName(tn));
+    const manualReq = isManual ? getManualRequirement(firstTask, cfg) : null;
 
     const startsAt = cfg.starts_at || cfg.startsAt || null;
     const expiresAt = cfg.expires_at || cfg.expiresAt || null;
@@ -73,6 +75,8 @@ function extractQuestInfo(quest) {
         questName,
         gameName,
         taskName: firstTask,
+        isManual,
+        manualReq,
         taskLabel: taskLabels[0] || formatTaskLabel(firstTask, minutes),
         taskLabels,
         minutes,
@@ -90,12 +94,74 @@ function formatTaskLabel(taskName, minutes) {
         WATCH_VIDEO: `Watch video for ${minutes} minutes`,
         WATCH_VIDEO_ON_MOBILE: `Watch on mobile for ${minutes} minutes`,
         PLAY_ON_DESKTOP: `Play on Desktop for ${minutes} minutes 🖥️`,
+        PLAY_ON_DESKTOP_V2: `Play on Desktop for ${minutes} minutes 🖥️`,
         PLAY_ON_XBOX: `Play on Xbox for ${minutes} minutes 🟢`,
         PLAY_ON_PLAYSTATION: `Play on PlayStation for ${minutes} minutes 🔵`,
         PLAY_ACTIVITY: `Play activity for ${minutes} minutes`,
         STREAM_ON_DESKTOP: `Stream on Desktop for ${minutes} minutes`,
+        ACHIEVEMENT_IN_GAME: `In-game achievement (manual)`,
+        ACHIEVEMENT_IN_ACTIVITY: `Activity achievement (manual)`,
+        JOIN_GUILD: `Join server (manual)`,
+        JOIN_SERVER: `Join server (manual)`,
     };
-    return map[taskName] || `${String(taskName).replace(/_/g, ' ')} (${minutes} min)`;
+    if (map[taskName]) return map[taskName];
+    const raw = String(taskName || 'Unknown').replace(/_/g, ' ');
+    if (minutes > 0) return `${raw} (${minutes} min)`;
+    return `${raw} (manual)`;
+}
+
+/** Tasks the bot cannot complete via API heartbeats */
+function isManualTaskName(taskName) {
+    if (!taskName || typeof taskName !== 'string') return true;
+    const tn = taskName.toUpperCase();
+    if (tn.startsWith('WATCH')) return false;
+    if (tn === 'PLAY_ON_DESKTOP' || tn === 'PLAY_ON_DESKTOP_V2' || tn.startsWith('PLAY_ON_')) return false;
+    if (tn.startsWith('STREAM')) return false;
+    if (tn === 'PLAY_ACTIVITY') return false;
+    // Everything else: achievements, join server, collect, third-party, etc.
+    return true;
+}
+
+function getManualRequirement(taskName, questConfig = {}) {
+    const tn = String(taskName || '').toUpperCase();
+    const cfg = questConfig || {};
+    const taskConfig = cfg.task_config || cfg.task_config_v2 || cfg.taskConfigV2 || cfg.taskConfig || {};
+    const enrollUrl = taskConfig.enrollment_url || cfg.enrollment_url || null;
+
+    if (tn.includes('JOIN') || tn.includes('GUILD') || tn.includes('SERVER')) {
+        return {
+            ar: 'لازم تدخل السيرفر يدوياً من زر Join Server داخل ديسكورد.',
+            en: 'You must join the server manually via the Join Server button in Discord.',
+            kind: 'join_server',
+        };
+    }
+    if (tn.includes('ACHIEVEMENT') || tn.includes('COLLECT') || tn.includes('FIND') || tn.includes('CARD')) {
+        return {
+            ar: 'لازم تكمّل الشرط داخل اللعبة/التطبيق (مثلاً جمع كروت أو إنجاز معيّن) — البوت ما يقدر يسويها.',
+            en: 'Complete the in-game/app requirement (e.g. collect cards or an achievement) — the bot cannot do this.',
+            kind: 'achievement',
+        };
+    }
+    if (tn.includes('LISTEN') || tn.includes('AUDIBLE') || tn.includes('SPOTIFY')) {
+        return {
+            ar: 'لازم تسمع المحتوى من التطبيق الرسمي يدوياً.',
+            en: 'Listen to the content in the official app manually.',
+            kind: 'listen',
+        };
+    }
+    if (enrollUrl || taskConfig.type === 2) {
+        return {
+            ar: 'مهمة طرف ثالث — لازم تكملها من الرابط/التطبيق الخارجي يدوياً.',
+            en: 'Third-party quest — complete it from the external link/app manually.',
+            kind: 'third_party',
+            url: enrollUrl || null,
+        };
+    }
+    return {
+        ar: 'هالنوع من المهام يدوي وما ينعمل أوتوماتيك من البوت.',
+        en: 'This quest type is manual and cannot be automated by the bot.',
+        kind: 'manual',
+    };
 }
 
 function formatTime(iso) {
@@ -167,6 +233,8 @@ function buildQuestListPayloads(quests, { isNew = false } = {}) {
 }
 
 module.exports = {
+    isManualTaskName,
+    getManualRequirement,
     extractQuestInfo,
     buildQuestEmbed,
     buildQuestListPayloads,

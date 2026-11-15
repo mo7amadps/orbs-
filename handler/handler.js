@@ -20,6 +20,7 @@ const {
     shouldSendClaimReminder, markClaimReminderSent,
 } = require('../database/db');
 const { t } = require('../utils/i18n');
+const { isManualTaskName, getManualRequirement } = require('../utils/questCard');
 
 const CLAIM_REMINDER_MS = 3 * 60 * 1000; // 3 دقائق
 
@@ -62,7 +63,10 @@ const TASK_COLORS = {
     WATCH_VIDEO: 0x57F287,           // green
     WATCH_VIDEO_ON_MOBILE: 0x57F287,
     PLAY_ON_DESKTOP: 0x5865F2,       // blurple
+    PLAY_ON_XBOX: 0x107C10,
+    PLAY_ON_PLAYSTATION: 0x003087,
     PLAY_ACTIVITY: 0xEB459E,         // fuchsia
+    STREAM_ON_DESKTOP: 0xED4245,     // red
     DEFAULT: 0xFEE75C,               // yellow
 };
 
@@ -79,8 +83,24 @@ function stopQuestTask(userId, qId) {
 
 // ─── Detect task name from tasks object ───────────────────────────────────────
 function detectTaskName(tasks) {
-    const TASK_PRIORITY = ['WATCH_VIDEO', 'WATCH_VIDEO_ON_MOBILE', 'PLAY_ON_DESKTOP', 'PLAY_ACTIVITY'];
+    const TASK_PRIORITY = [
+        'WATCH_VIDEO',
+        'WATCH_VIDEO_ON_MOBILE',
+        'PLAY_ON_DESKTOP',
+        'STREAM_ON_DESKTOP',
+        'PLAY_ACTIVITY',
+        'PLAY_ON_XBOX',
+        'PLAY_ON_PLAYSTATION',
+    ];
     return TASK_PRIORITY.find(t => t in tasks) || Object.keys(tasks)[0] || null;
+}
+
+function isPlayTask(taskName) {
+    return typeof taskName === 'string' && (taskName === 'PLAY_ON_DESKTOP' || taskName.startsWith('PLAY_ON_'));
+}
+
+function isStreamTask(taskName) {
+    return taskName === 'STREAM_ON_DESKTOP' || (typeof taskName === 'string' && taskName.startsWith('STREAM_'));
 }
 
 /** Visual progress bar e.g. ████████░░ 80% */
@@ -342,7 +362,13 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
         }
 
         const data = await resp.json();
-        secondsDone = data?.progress?.PLAY_ON_DESKTOP?.value || secondsDone || 0;
+        const prog = data?.progress || {};
+        secondsDone = prog.PLAY_ON_DESKTOP?.value
+            ?? prog.PLAY_ON_XBOX?.value
+            ?? prog.PLAY_ON_PLAYSTATION?.value
+            ?? Object.values(prog).find(p => p && typeof p.value === 'number')?.value
+            ?? secondsDone
+            ?? 0;
         if (secondsDone <= lastProgress) {
             stuckBeats++;
             if (stuckBeats >= 8) {
@@ -389,6 +415,113 @@ async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, 
 }
 
 // ─── Activity Quest ────────────────────────────────────────────────────────────
+async function handleStreamQuest({ dmMessage, headers, qId, qName, secondsNeeded, speedMode = 'normal', ctrl, lang = 'en', quiet = false }) {
+    const streamKey = 'call:1:1';
+    const interval = speedMode === 'fast' ? 20000 : 30000;
+    let secondsDone = 0;
+    const progressLines = [];
+    let uiCounter = 0;
+    const uiThrottle = speedMode === 'fast' ? 2 : 1;
+    const color = TASK_COLORS.STREAM_ON_DESKTOP;
+    const startedAt = Date.now();
+    const maxMs = (secondsNeeded * 1000) + (10 * 60 * 1000);
+    let lastProgress = -1;
+    let stuckBeats = 0;
+
+    if (!quiet) {
+        await safeEdit(dmMessage, buildProgressComponents(qName, [t(lang, 'quest_starting') || 'Starting...'], { color, showStop: true }));
+    }
+
+    while (secondsDone < secondsNeeded) {
+        if (ctrl.cancelled) {
+            try {
+                await fetch(`https://discord.com/api/v9/quests/${qId}/heartbeat`, {
+                    method: 'POST', headers,
+                    body: JSON.stringify({ stream_key: streamKey, terminal: true }),
+                });
+            } catch { }
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_stopped') || 'Quest Stopped', [t(lang, 'quest_stopped_by_user') || 'Stopped by user.'], { color }));
+            return false;
+        }
+        if (Date.now() - startedAt > maxMs) {
+            progressLines.push('[TIMEOUT] stopped to avoid hang');
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
+            return false;
+        }
+
+        let resp;
+        try {
+            resp = await fetchWithRetry(`https://discord.com/api/v9/quests/${qId}/heartbeat`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ stream_key: streamKey, terminal: false }),
+            }, { retries: 2, baseDelay: 3000 });
+        } catch (err) {
+            console.error(`[Handler] stream heartbeat error: ${err.message}`);
+            progressLines.push(`[ERROR] ${err.message.slice(0, 80)}`);
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
+            return false;
+        }
+
+        if (resp.status !== 200) {
+            progressLines.push(`[ERROR] heartbeat ${resp.status}`);
+            await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
+            return false;
+        }
+
+        const data = await resp.json();
+        const prog = data?.progress || {};
+        secondsDone = prog.STREAM_ON_DESKTOP?.value
+            ?? prog.PLAY_ACTIVITY?.value
+            ?? Object.values(prog).find(p => p && typeof p.value === 'number')?.value
+            ?? secondsDone
+            ?? 0;
+
+        if (secondsDone <= lastProgress) {
+            stuckBeats++;
+            if (stuckBeats >= 8) {
+                progressLines.push('[STUCK] progress frozen — stop');
+                await safeEdit(dmMessage, buildProgressComponents(t(lang, 'quest_error') || 'Quest Error', progressLines, { color }));
+                return false;
+            }
+        } else {
+            stuckBeats = 0;
+            lastProgress = secondsDone;
+        }
+
+        const percent = Math.min(100, Math.floor((secondsDone / secondsNeeded) * 100));
+        const eta = formatEta(secondsNeeded - secondsDone);
+        uiCounter++;
+
+        if (uiCounter >= uiThrottle || secondsDone >= secondsNeeded) {
+            progressLines.push(`[PROGRESS] ${Math.floor(secondsDone)}/${secondsNeeded}s`);
+            if (progressLines.length > 8) progressLines.splice(0, progressLines.length - 8);
+            if (!quiet || secondsDone >= secondsNeeded) {
+                await safeEdit(dmMessage, buildProgressComponents(qName, progressLines, { percent, eta, color, showStop: true }));
+            }
+            uiCounter = 0;
+        }
+
+        await sleep(interval);
+    }
+
+    try {
+        await fetch(`https://discord.com/api/v9/quests/${qId}/heartbeat`, {
+            method: 'POST', headers,
+            body: JSON.stringify({ stream_key: streamKey, terminal: true }),
+        });
+    } catch { }
+
+    progressLines.push('[DONE] 100%');
+    progressLines.push(t(lang, 'quest_done_claim') || '✅ Done — claim your reward');
+    await safeEdit(dmMessage, buildProgressComponents(
+        t(lang, 'quest_completed_title') || 'Quest Completed!',
+        progressLines,
+        claimOpts(qId, lang, color)
+    ));
+    return true;
+}
+
 async function handleActivityQuest({ dmMessage, headers, qId, qName, secondsNeeded, speedMode = 'normal', ctrl, lang = 'en', quiet = false }) {
     const streamKey = 'call:1:1';
     const interval = speedMode === 'fast' ? 20000 : 30000;
@@ -502,6 +635,23 @@ async function runQuest({ dmMessage, headers, qId, qName, questConfig, speedMode
         return false;
     }
 
+    // Join Server / Collect cards / achievements / third-party → manual only
+    if (isManualTaskName(taskName)) {
+        const req = getManualRequirement(taskName, questConfig);
+        const lines = [
+            `${EMOJIES.error} مهمة يدوية — البوت ما يقدر يكملها`,
+            `النوع: \`${taskName}\``,
+            '',
+            `📋 الشرط: ${req.ar}`,
+            req.en ? `EN: ${req.en}` : null,
+            req.url ? `رابط: ${req.url}` : null,
+            '',
+            'سوّيها بنفسك من Quest Home بعدين ارجع استلم المكافأة.',
+        ].filter(Boolean);
+        await dmMessage.edit(buildProgressComponents(qName, lines));
+        return false;
+    }
+
     const secondsNeeded = tasks[taskName]?.target;
     if (!secondsNeeded) {
         await dmMessage.edit(buildProgressComponents(qName, [`${EMOJIES.error} Missing quest target time`]));
@@ -511,13 +661,27 @@ async function runQuest({ dmMessage, headers, qId, qName, questConfig, speedMode
     const common = { dmMessage, headers, qId, qName, secondsNeeded, ctrl, lang, quiet };
     if (taskName.startsWith('WATCH')) {
         return handleVideoQuest(common);
-    } else if (taskName === 'PLAY_ON_DESKTOP') {
+    } else if (isPlayTask(taskName) || taskName === 'PLAY_ON_DESKTOP') {
         return handlePlayQuest({ ...common, questConfig, speedMode });
+    } else if (isStreamTask(taskName)) {
+        return handleStreamQuest({ ...common, speedMode });
     } else if (taskName === 'PLAY_ACTIVITY') {
         return handleActivityQuest({ ...common, speedMode });
     }
 
-    await dmMessage.edit(buildProgressComponents(qName, [`${EMOJIES.error} Unsupported quest task: ${taskName}`]));
+    // Manual / unsupported (Join Server, Collect cards, achievements, third-party...)
+    const req = getManualRequirement(taskName, questConfig);
+    const lines = [
+        `${EMOJIES.error} مهمة يدوية — البوت ما يقدر يكملها`,
+        `النوع: \`${taskName}\``,
+        '',
+        `📋 الشرط: ${req.ar}`,
+        req.en ? `EN: ${req.en}` : null,
+        req.url ? `رابط: ${req.url}` : null,
+        '',
+        'سوّيها بنفسك من Quest Home بعدين ارجع استلم المكافأة.',
+    ].filter(Boolean);
+    await dmMessage.edit(buildProgressComponents(qName, lines));
     return false;
 }
 
@@ -600,7 +764,7 @@ async function solveQuest({ interaction, token, qId, qName, questConfig, speedMo
                 rateLimited ? (t(lang, 'rate_limited_title') || 'Rate limited') : qName,
                 [`${EMOJIES.error} ${tip}`],
             ));
-            return rateLimited ? 'RATE_LIMITED' : false;
+            return rateLimited ? `RATE_LIMITED:${retryAfterSec}` : false;
         }
 
         const key = `${userId}_${qId}`;

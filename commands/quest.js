@@ -23,7 +23,7 @@ const {
     shouldSendClaimReminder, markClaimReminderSent,
 } = require('../database/db');
 const { solveQuest, stopQuestTask } = require('../handler/handler');
-const { buildQuestEmbed, extractQuestInfo } = require('../utils/questCard');
+const { buildQuestEmbed, extractQuestInfo, isManualTaskName } = require('../utils/questCard');
 const { t } = require('../utils/i18n');
 const { isVip, isGuildMember, isStarter } = require('../utils/permissions');
 const { requireStart, requireStarter, requirePro, isOwner } = require('../utils/guards');
@@ -78,6 +78,55 @@ async function waitQuestCooldown(interaction, state, nextQuestName, cooldownSec,
     return state.isRunning;
 }
 
+
+/** Wait out Discord rate limit / enrollment pressure; Stop cancels */
+async function waitEnrollmentBlock(interaction, state, retryAfterSec, lang) {
+    const raw = Math.max(0, Number(retryAfterSec) || 120);
+    // حظر طويل (أكثر من 30 دقيقة) — ما نعلق البوت ساعات؛ نبلّغ ونوقف
+    const LONG_BLOCK_SEC = 30 * 60;
+    if (raw > LONG_BLOCK_SEC) {
+        const hours = (raw / 3600).toFixed(1);
+        const untilTs = Math.floor(Date.now() / 1000) + Math.floor(raw);
+        try {
+            await interaction.editReply({
+                content: [
+                    '⛔ **حظر تسجيل طويل من ديسكورد**',
+                    `المدة تقريباً: **~${hours} ساعة** (${Math.floor(raw / 60)} دقيقة)`,
+                    `يفك تقريباً: <t:${untilTs}:f> (<t:${untilTs}:R>)`,
+                    'ما راح ننتظر كل هالمدة — وقفنا الطابور.',
+                    'ارجع بعد ما يفك الحظر وشغّل `/vip-quest` من جديد.',
+                ].join('\n'),
+                components: [],
+            });
+        } catch { }
+        state.isRunning = false;
+        return false;
+    }
+
+    const sec = Math.max(15, Math.min(raw, 30 * 60)); // 15s .. 30m
+    const deadline = Date.now() + sec * 1000;
+    let lastShown = null;
+    while (state.isRunning) {
+        const remaining = Math.ceil((deadline - Date.now()) / 1000);
+        if (remaining <= 0) break;
+        if (remaining % 10 === 0 && remaining !== lastShown) {
+            lastShown = remaining;
+            try {
+                await interaction.editReply({
+                    content: [
+                        '⛔ **ديسكورد حاجب التسجيل مؤقتاً**',
+                        `⏳ انتظار تلقائي: **${remaining}s** ثم نكمل الطابور`,
+                        '⏹️ Stop يلغي الانتظار والطابور',
+                    ].join('\n'),
+                    components: [buildControlButtons(true)],
+                });
+            } catch { }
+        }
+        await new Promise(r => setTimeout(r, Math.min(1000, deadline - Date.now())));
+    }
+    return state.isRunning;
+}
+
 async function fetchActiveQuests(token) {
     const headers = getHeaders(token);
     const resp = await fetch('https://discord.com/api/v9/quests/@me', { headers });
@@ -122,9 +171,12 @@ async function fetchActiveQuests(token) {
 function buildQuestSelectMenu(quests) {
     const options = quests.slice(0, 25).map(q => {
         const info = extractQuestInfo(q);
+        const desc = info.isManual
+            ? `✋ يدوي • ${info.taskLabel || info.taskName}`
+            : `${info.gameName} • ${info.taskLabel}`;
         return new StringSelectMenuOptionBuilder()
             .setLabel(info.questName.slice(0, 100))
-            .setDescription(`${info.gameName} • ${info.taskLabel}`.slice(0, 100))
+            .setDescription(desc.slice(0, 100))
             .setValue(q.id);
     });
     return new StringSelectMenuBuilder()
@@ -176,8 +228,8 @@ function filterQuests(quests, filterKey) {
         const info = extractQuestInfo(q);
         const tn = info.taskName || '';
         if (filterKey === 'video') return tn.startsWith('WATCH');
-        if (filterKey === 'play') return tn === 'PLAY_ON_DESKTOP';
-        if (filterKey === 'activity') return tn === 'PLAY_ACTIVITY';
+        if (filterKey === 'play') return tn === 'PLAY_ON_DESKTOP' || tn.startsWith('PLAY_ON_') || tn.startsWith('STREAM');
+        if (filterKey === 'activity') return tn === 'PLAY_ACTIVITY' || tn.startsWith('STREAM');
         return true;
     });
 }
@@ -246,8 +298,15 @@ async function handleQuestDM(interaction, token, lang, isVipMode) {
             try {
                 const until = new Date(result.blockedUntil);
                 if (until > new Date()) {
+                    const untilTs = Math.floor(until.getTime() / 1000);
+                    const hoursLeft = ((until.getTime() - Date.now()) / 3600000).toFixed(1);
                     return interaction.editReply({
-                        content: `⛔ ديسكورد حاجب التسجيل بالمهام حتى: **${until.toISOString()}**\nEnrollment blocked — جرّب لاحقاً.`,
+                        content: [
+                            '⛔ **ديسكورد حاجب التسجيل بالمهام**',
+                            `المتبقي تقريباً: **~${hoursLeft} ساعة**`,
+                            `يفك: <t:${untilTs}:f> (<t:${untilTs}:R>)`,
+                            'Enrollment blocked — ارجع بعد هذا الوقت.',
+                        ].join('\n'),
                     });
                 }
             } catch { }
@@ -495,14 +554,21 @@ async function handleQuestInteraction(client, interaction) {
         });
     }
 
-    // Stop button
+    // Stop button — يلغي المهمة الحالية + طابور Auto All
     if (interaction.isButton() && interaction.customId === 'quest_stop') {
         if (state) {
             state.isRunning = false;
             if (state.qId) stopQuestTask(userId, state.qId);
-            userQuestState.delete(userId);
+            // لا نحذف الـ state فوراً أثناء الطابور؛ isRunning=false يكفي يوقف الحلقات
+            try {
+                await interaction.update({
+                    content: '⏹️ **تم الإيقاف** — توقفت المهمة/الطابور.',
+                    components: [],
+                });
+                return;
+            } catch { }
         }
-        return interaction.reply({ content: '⏹️ Stopped.', ephemeral: true });
+        return interaction.reply({ content: '⏹️ تم الإيقاف.', ephemeral: true });
     }
 
     // Auto All (VIP) — first pick mode: all / video / play
@@ -544,20 +610,35 @@ async function handleQuestInteraction(client, interaction) {
         } else if (mode === 'play') {
             pool = pool.filter(q => {
                 const tn = extractQuestInfo(q).taskName || '';
-                return tn === 'PLAY_ON_DESKTOP' || tn === 'PLAY_ACTIVITY' || tn.startsWith('PLAY_');
+                return tn === 'PLAY_ON_DESKTOP' || tn === 'PLAY_ACTIVITY' || tn.startsWith('PLAY_') || tn.startsWith('STREAM');
             });
         }
 
+        // استبعد مهام Join Server / Collect / Achievement (يدوية)
+        const manualSkipped = pool.filter(q => extractQuestInfo(q).isManual);
+        pool = pool.filter(q => !extractQuestInfo(q).isManual);
+
         if (!pool.length) {
-            return interaction.reply({ content: '📭 ما في مهام من هالنوع حالياً.', ephemeral: true });
+            const names = manualSkipped.slice(0, 5).map(q => extractQuestInfo(q).questName).join(', ');
+            return interaction.reply({
+                content: [
+                    '📭 ما في مهام أوتوماتيك من هالنوع حالياً.',
+                    manualSkipped.length
+                        ? `✋ تم استبعاد ${manualSkipped.length} مهمة يدوية (Join Server / Collect / إنجاز): ${names}${manualSkipped.length > 5 ? '…' : ''}`
+                        : '',
+                    'هالمهام لازم تسويها بنفسك من Quest Home.',
+                ].filter(Boolean).join('\n'),
+                ephemeral: true,
+            });
         }
 
         await interaction.deferUpdate();
         state.isRunning = true;
         state.queueMode = true;
         const cooldown = COOLDOWN_VIP;
+        const skippedManualCount = manualSkipped.length;
 
-        const TASK_ORDER = { WATCH_VIDEO: 0, WATCH_VIDEO_ON_MOBILE: 1, PLAY_ON_DESKTOP: 2, PLAY_ACTIVITY: 3 };
+        const TASK_ORDER = { WATCH_VIDEO: 0, WATCH_VIDEO_ON_MOBILE: 1, PLAY_ON_DESKTOP: 2, STREAM_ON_DESKTOP: 3, PLAY_ACTIVITY: 4, PLAY_ON_XBOX: 5, PLAY_ON_PLAYSTATION: 6 };
         const quests = pool.sort((a, b) => {
             const ia = extractQuestInfo(a);
             const ib = extractQuestInfo(b);
@@ -571,6 +652,10 @@ async function handleQuestInteraction(client, interaction) {
         const modeLabel = mode === 'video' ? 'فيديو' : mode === 'play' ? 'ألعاب' : 'الكل';
         let okCount = 0;
         let failCount = 0;
+        const okNames = [];
+        const failNames = [];
+        const maxRateLimitWaits = 2;
+        let rateLimitWaits = 0;
 
         for (let i = 0; i < quests.length; i++) {
             if (!state.isRunning) break;
@@ -585,12 +670,13 @@ async function handleQuestInteraction(client, interaction) {
                 await interaction.editReply({
                     content: `⚡ Auto All (**${modeLabel}**) · ${quests.length} مهمة\n⏱ ${eta.label}\n` +
                         `[${i + 1}/${quests.length}] **${info.questName}** (${info.minutes || '?'}m)\n` +
-                        `✅ ${okCount} · ❌ ${failCount}`,
+                        `✅ ${okCount} · ❌ ${failCount}` +
+                        (skippedManualCount ? ` · ✋ ${skippedManualCount}` : ''),
                     components: [buildControlButtons(true)],
                 });
             } catch { }
 
-            const ok = await solveQuest({
+            let ok = await solveQuest({
                 interaction,
                 userId,
                 token: state.token,
@@ -602,33 +688,74 @@ async function handleQuestInteraction(client, interaction) {
                     traffic_metadata_sealed: q.traffic_metadata_sealed ?? (q.config && q.config.traffic_metadata_sealed),
                     _questRoot: q,
                 },
-                // normal heartbeat interval أثناء Auto All = أقل طلبات = أقل Rate Limit
                 speedMode: 'normal',
                 sendClaimReminder: false,
                 isVip: true,
             });
 
-            if (ok === 'RATE_LIMITED') {
-                failCount++;
-                state.isRunning = false;
+            // Rate limit / enrollment pressure → wait and retry same quest
+            while (typeof ok === 'string' && ok.startsWith('RATE_LIMITED') && state.isRunning) {
+                rateLimitWaits++;
+                if (rateLimitWaits > maxRateLimitWaits) {
+                    failCount++;
+                    failNames.push(`${info.questName} (rate limit)`);
+                    try {
+                        await interaction.editReply({
+                            content: [
+                                '⛔ **Rate limit كثير** — وقفنا الطابور بعد عدة محاولات',
+                                `✅ ${okCount} · ❌ ${failCount}`,
+                                'جرب بعد كم دقيقة `/vip-quest`',
+                            ].join('\n'),
+                            components: [buildControlButtons(true)],
+                        });
+                    } catch { }
+                    state.isRunning = false;
+                    break;
+                }
+                const parts = ok.split(':');
+                const retrySec = Math.max(30, parseInt(parts[1], 10) || 120);
+                const cont = await waitEnrollmentBlock(interaction, state, retrySec, lang);
+                if (!cont) break;
                 try {
                     await interaction.editReply({
-                        content: [
-                            t(lang, 'rate_limited_title') || '⛔ Rate limited',
-                            t(lang, 'rate_limited_stop') || 'Discord rate-limited this account. Queue stopped.',
-                            `✅ ${okCount} · ❌ ${failCount}`,
-                            t(lang, 'rate_limited_wait') || 'Wait a few minutes then run /vip-quest again.',
-                        ].join('\n'),
-                        components: [],
+                        content: `🔄 انفك الانتظار — نعيد **${info.questName}**...\n✅ ${okCount} · ❌ ${failCount}`,
+                        components: [buildControlButtons(true)],
                     });
                 } catch { }
+                ok = await solveQuest({
+                    interaction,
+                    userId,
+                    token: state.token,
+                    qId: q.id,
+                    qName: info.questName,
+                    questConfig: {
+                        ...(q.config || {}),
+                        traffic_metadata_raw: q.traffic_metadata_raw ?? (q.config && q.config.traffic_metadata_raw),
+                        traffic_metadata_sealed: q.traffic_metadata_sealed ?? (q.config && q.config.traffic_metadata_sealed),
+                        _questRoot: q,
+                    },
+                    speedMode: 'normal',
+                    sendClaimReminder: false,
+                    isVip: true,
+                });
+            }
+
+            if (!state.isRunning) break;
+
+            if (typeof ok === 'string' && ok.startsWith('RATE_LIMITED')) {
+                failCount++;
+                failNames.push(`${info.questName} (rate limit)`);
                 break;
             }
 
-            if (ok) okCount++;
-            else failCount++;
+            if (ok) {
+                okCount++;
+                okNames.push(info.questName);
+            } else {
+                failCount++;
+                failNames.push(info.questName);
+            }
 
-            // Skip failed — continue queue unless user pressed Stop
             if (!state.isRunning) break;
 
             if (i < quests.length - 1) {
@@ -640,9 +767,27 @@ async function handleQuestInteraction(client, interaction) {
 
         state.isRunning = false;
         state.queueMode = false;
+
+        const fmtList = (arr, limit = 8) => {
+            if (!arr.length) return '—';
+            const shown = arr.slice(0, limit).map(n => `• ${n}`);
+            if (arr.length > limit) shown.push(`• … +${arr.length - limit}`);
+            return shown.join('\n');
+        };
+
         try {
             await interaction.editReply({
-                content: `${EMOJIES.success} **Auto All خلص** (${modeLabel})\n✅ نجح: **${okCount}**\n❌ فشل/تخطي: **${failCount}**`,
+                content: [
+                    `${EMOJIES.success} **Auto All خلص** (${modeLabel})`,
+                    `✅ نجح: **${okCount}**`,
+                    okNames.length ? fmtList(okNames) : null,
+                    `❌ فشل/تخطي: **${failCount}**`,
+                    failNames.length ? fmtList(failNames) : null,
+                    skippedManualCount
+                        ? `✋ يدوي مستبعد: **${skippedManualCount}** (Join/Collect/إنجاز — سوّها بنفسك)`
+                        : null,
+                    rateLimitWaits ? `⏳ مرات انتظار الحظر: ${rateLimitWaits}` : null,
+                ].filter(Boolean).join('\n'),
                 components: [],
             });
         } catch { }
