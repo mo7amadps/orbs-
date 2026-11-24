@@ -23,11 +23,36 @@ function extractQuestInfo(quest) {
     const minutes = Math.ceil(secondsNeeded / 60) || 0;
 
     const questName = messages.quest_name || messages.questName || 'Unknown Quest';
+
+    // Resolve application name/id from both old and new (taskConfigV2) structures
+    let appName = null;
+    let appId = null;
+    if (cfg.application) {
+        appName = cfg.application.name || null;
+        appId = cfg.application.id || null;
+    }
+    if (!appId || !appName) {
+        const tc = cfg.task_config || cfg.task_config_v2 || cfg.taskConfigV2 || cfg.taskConfig || {};
+        const tks = tc.tasks || {};
+        for (const t of Object.values(tks)) {
+            const apps = t.applications || t.application || [];
+            const list = Array.isArray(apps) ? apps : [apps];
+            for (const a of list) {
+                if (a) {
+                    if (!appId && (a.id || a.application_id)) appId = a.id || a.application_id;
+                    if (!appName && a.name) appName = a.name;
+                }
+            }
+            if (appId && appName) break;
+        }
+    }
+
     const gameName =
         messages.game_title ||
         messages.game_name ||
         messages.gameName ||
-        (cfg.application && (cfg.application.name || cfg.application.id)) ||
+        appName ||
+        appId ||
         messages.quest_name ||
         'Unknown Game';
 

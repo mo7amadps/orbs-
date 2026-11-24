@@ -103,6 +103,69 @@ function isStreamTask(taskName) {
     return taskName === 'STREAM_ON_DESKTOP' || (typeof taskName === 'string' && taskName.startsWith('STREAM_'));
 }
 
+/**
+ * Extract application ID from quest config.
+ * Discord moved it in July 2026 from config.application.id
+ * to config.taskConfigV2.tasks.<TASK>.applications[0].id
+ * Support both old and new structures + common variants.
+ */
+function getApplicationId(questConfig, taskName = null) {
+    if (!questConfig || typeof questConfig !== 'object') return null;
+
+    // Old path (pre-July 2026)
+    const oldId = questConfig.application?.id || questConfig.application_id;
+    if (oldId) return String(oldId);
+
+    // New path: taskConfigV2 / task_config_v2 / task_config
+    const taskConfig =
+        questConfig.task_config ||
+        questConfig.task_config_v2 ||
+        questConfig.taskConfigV2 ||
+        questConfig.taskConfig ||
+        {};
+    const tasks = taskConfig.tasks || {};
+
+    // Prefer the specific task if provided
+    const candidates = [];
+    if (taskName && tasks[taskName]) candidates.push(tasks[taskName]);
+    // Otherwise scan all tasks (priority order helps)
+    const priority = [
+        'PLAY_ON_DESKTOP',
+        'PLAY_ON_DESKTOP_V2',
+        'PLAY_ON_XBOX',
+        'PLAY_ON_PLAYSTATION',
+        'STREAM_ON_DESKTOP',
+        'PLAY_ACTIVITY',
+    ];
+    for (const key of priority) {
+        if (tasks[key] && !candidates.includes(tasks[key])) candidates.push(tasks[key]);
+    }
+    // Any remaining tasks
+    for (const t of Object.values(tasks)) {
+        if (!candidates.includes(t)) candidates.push(t);
+    }
+
+    for (const task of candidates) {
+        // applications can be array or single object
+        const apps = task.applications || task.application || [];
+        const list = Array.isArray(apps) ? apps : [apps];
+        for (const app of list) {
+            if (app && (app.id || app.application_id)) {
+                return String(app.id || app.application_id);
+            }
+        }
+        // Some payloads put id directly on the task
+        if (task.application_id) return String(task.application_id);
+        if (task.id && typeof task.id === 'string' && /^\d+$/.test(task.id)) return task.id;
+    }
+
+    // Last resort: top-level applications array
+    const topApps = questConfig.applications || [];
+    if (Array.isArray(topApps) && topApps[0]?.id) return String(topApps[0].id);
+
+    return null;
+}
+
 /** Visual progress bar e.g. ████████░░ 80% */
 function progressBar(percent, width = 12) {
     const p = Math.max(0, Math.min(100, Math.floor(percent)));
@@ -301,11 +364,16 @@ async function handleVideoQuest({ dmMessage, headers, qId, qName, secondsNeeded,
 }
 
 // ─── Play Quest ────────────────────────────────────────────────────────────────
-async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, questConfig, speedMode = 'normal', ctrl, lang = 'en', quiet = false }) {
-    const appId = questConfig?.application?.id;
+async function handlePlayQuest({ dmMessage, headers, qId, qName, secondsNeeded, questConfig, speedMode = 'normal', ctrl, lang = 'en', quiet = false, taskName = null }) {
+    // Support both old (config.application.id) and new (taskConfigV2.tasks.*.applications[0].id) paths
+    const appId = getApplicationId(questConfig, taskName);
     const color = TASK_COLORS.PLAY_ON_DESKTOP;
     if (!appId) {
-        await dmMessage.edit(buildProgressComponents(qName, [`${EMOJIES.error} Application ID missing`], { color }));
+        await dmMessage.edit(buildProgressComponents(qName, [
+            `${EMOJIES.error} Application ID missing`,
+            'ديسكورد نقل مكان الـ Application ID (يوليو 2026).',
+            'جرب حدث البوت أو أعد تشغيل الكويست.',
+        ], { color }));
         return false;
     }
 
@@ -662,7 +730,7 @@ async function runQuest({ dmMessage, headers, qId, qName, questConfig, speedMode
     if (taskName.startsWith('WATCH')) {
         return handleVideoQuest(common);
     } else if (isPlayTask(taskName) || taskName === 'PLAY_ON_DESKTOP') {
-        return handlePlayQuest({ ...common, questConfig, speedMode });
+        return handlePlayQuest({ ...common, questConfig, speedMode, taskName });
     } else if (isStreamTask(taskName)) {
         return handleStreamQuest({ ...common, speedMode });
     } else if (taskName === 'PLAY_ACTIVITY') {
