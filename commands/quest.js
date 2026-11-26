@@ -31,8 +31,8 @@ const { config } = require('../utils/config');
 
 const userQuestState = new Map();
 
-const COOLDOWN_NORMAL = 180; // 3 دقائق — أقل Rate Limit للناس العاديين
-const COOLDOWN_VIP = 120;    // 2 دقائق — Auto All / VIP
+const COOLDOWN_NORMAL = 120; // 120 ثانية — لما يختار المهمة يدوياً
+const COOLDOWN_VIP = 240;    // 4 دقائق — Auto All بين كل مهمة والمهمة اللي بعدها
 
 /** Estimate total Auto All time: sum of quest minutes + cooldowns between them */
 function estimateQueueTime(quests, cooldownSec) {
@@ -328,6 +328,7 @@ async function handleQuestDM(interaction, token, lang, isVipMode) {
             qName: null,
             questConfig: null,
             selectedQuest: null,
+            lastFinishedAt: 0, // لفرض cooldown بين المهام اليدوية
         });
 
         const selectMenu = buildQuestSelectMenu(result.quests);
@@ -339,7 +340,7 @@ async function handleQuestDM(interaction, token, lang, isVipMode) {
                 `🔑 **التوكن:** شغال ✅`,
                 t(lang, 'quest_found', { count: result.quests.length }),
                 t(lang, 'select_quest'),
-                isVipMode ? '⚡ **VIP** — 120s · Auto All (أولوية في الطابور)' : '📋 **Normal** — 180s cooldown',
+                isVipMode ? '⚡ **VIP** — 4m · Auto All (أولوية في الطابور)' : '📋 **Normal** — 120s بين المهام اليدوية',
                 '',
                 '⏹️ Stop يظهر مع بدء المهمة / أثناء التشغيل.',
             ].join('\n'),
@@ -635,7 +636,7 @@ async function handleQuestInteraction(client, interaction) {
         await interaction.deferUpdate();
         state.isRunning = true;
         state.queueMode = true;
-        // VIP / Auto All = 120s | الناس العاديين = 180s
+        // Auto All = 240s (4 دقائق) | يدوي = 120s
         const cooldown = state.isVipMode ? COOLDOWN_VIP : COOLDOWN_NORMAL;
         const skippedManualCount = manualSkipped.length;
 
@@ -821,6 +822,17 @@ async function handleQuestInteraction(client, interaction) {
             return interaction.reply({ content: t(lang, 'only_one_running'), ephemeral: true });
         }
 
+        // cooldown بين المهام اليدوية (120 ثانية)
+        const manualCooldownSec = COOLDOWN_NORMAL;
+        const sinceLast = Date.now() - (state.lastFinishedAt || 0);
+        if (state.lastFinishedAt && sinceLast < manualCooldownSec * 1000) {
+            const remain = Math.ceil((manualCooldownSec * 1000 - sinceLast) / 1000);
+            return interaction.reply({
+                content: `⏳ انتظر **${remain} ثانية** قبل ما تبدأ مهمة يدوية ثانية (cooldown ${manualCooldownSec}s).`,
+                ephemeral: true,
+            });
+        }
+
         const qId = interaction.values[0];
         const quest = state.allQuests.find(q => String(q.id) === String(qId) || String(q.config && q.config.id) === String(qId));
         if (!quest) {
@@ -864,6 +876,7 @@ async function handleQuestInteraction(client, interaction) {
         });
 
         state.isRunning = false;
+        state.lastFinishedAt = Date.now();
         return;
     }
 
